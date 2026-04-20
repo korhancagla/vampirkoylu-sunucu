@@ -56,7 +56,7 @@ function checkGameOver(roomId) {
     
     // Update Scores
     Object.values(room.players).forEach(p => {
-      if (winner === 'villagers' && p.role === 'villager') {
+      if (winner === 'villagers' && p.role === 'villager' && !p.isDead) {
          p.score = (p.score || 0) + 1;
       } else if (winner === 'vampires' && p.role === 'vampire') {
          p.score = (p.score || 0) + 2;
