@@ -51,6 +51,15 @@ function checkGameOver(roomId) {
     clearTimer(room);
     room.state = 'finished';
     
+    // Ensure the last round is pushed if it hasn't been yet (e.g. game ended at dawn)
+    if (room.currentRoundData && (room.currentRoundData.nightVictim || room.currentRoundData.dayVictim)) {
+       const alreadyPushed = room.roundsData.length > 0 && room.roundsData[room.roundsData.length-1].round === room.currentRoundData.round;
+       if (!alreadyPushed) {
+          room.roundsData.push(Object.assign({}, room.currentRoundData));
+       }
+    }
+
+    
     // Update Scores based on new Phase 4 rules
     Object.values(room.players).forEach(p => {
       if (winner === 'villagers' && (p.role === 'villager' || p.role === 'healer')) {
@@ -185,6 +194,8 @@ function processDayExecution(roomId) {
   // Increment round THEN reset currentRoundData for next round
   room.round += 1;
   room.currentRoundData = { round: room.round, dayVotes: {}, dayVictim: null, nightVictim: null, healed: false, nightKillFlavor: '', isTie: false };
+  io.to(roomId).emit('current-round-updated', Object.assign({}, room.currentRoundData));
+
 
   room.votes = {};
   io.to(roomId).emit('votes-cleared');
