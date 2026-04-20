@@ -313,8 +313,7 @@ io.on('connection', (socket) => {
        const targetSocket = io.sockets.sockets.get(specData.socketId);
        if (targetSocket) {
           targetSocket.join(roomId);
-          const misafirName = `(Misafir) ${specData.userName}`;
-          room.players[specData.peerId] = { userName: misafirName, role: 'spectator', socketId: specData.socketId, isDead: true, score: specData.localScore };
+          room.players[specData.peerId] = { userName: specData.userName, role: 'spectator', socketId: specData.socketId, isDead: true, score: specData.localScore };
           
           targetSocket.emit('room-info', {
              admin: room.admin,
@@ -329,7 +328,7 @@ io.on('connection', (socket) => {
           targetSocket.emit('game-started', { phase: room.phase });
           targetSocket.emit('role-assigned', 'spectator');
 
-          io.to(roomId).emit('user-connected', specData.peerId, misafirName, 'spectator');
+          io.to(roomId).emit('user-connected', specData.peerId, specData.userName, 'spectator');
        }
     });
 
