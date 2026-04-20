@@ -54,10 +54,19 @@ function checkGameOver(roomId) {
     clearTimer(room);
     room.state = 'finished';
     
+    // Update Scores
+    Object.values(room.players).forEach(p => {
+      if (winner === 'villagers' && p.role === 'villager') {
+         p.score = (p.score || 0) + 1;
+      } else if (winner === 'vampires' && p.role === 'vampire') {
+         p.score = (p.score || 0) + 2;
+      }
+    });
+
     // Prepare roles mapping
     const rolesMap = {};
     Object.entries(room.players).forEach(([id, p]) => {
-      rolesMap[id] = { userName: p.userName, role: p.role, isDead: p.isDead };
+      rolesMap[id] = { userName: p.userName, role: p.role, isDead: p.isDead, score: p.score || 0 };
     });
 
     console.log(`[Room ${roomId}] GAME OVER - Winner: ${winner}`);
@@ -96,6 +105,18 @@ function processVotes(roomId) {
     room.players[targetToKill].isDead = true;
     console.log(`[Room ${roomId}] Player Killed: ${targetToKill}`);
     io.to(roomId).emit('player-killed', targetToKill, room.phase);
+  } else if (room.phase === 'night' && Object.keys(room.votes).length === 0) {
+    // If no votes were cast at all during the night, automatically kill a random living villager
+    const livingVillagers = Object.entries(room.players)
+      .filter(([id, p]) => !p.isDead && p.role === 'villager')
+      .map(([id, p]) => id);
+
+    if (livingVillagers.length > 0) {
+      const randomTarget = livingVillagers[Math.floor(Math.random() * livingVillagers.length)];
+      room.players[randomTarget].isDead = true;
+      console.log(`[Room ${roomId}] Vampires missed slot. System Auto-Killed Villager: ${randomTarget}`);
+      io.to(roomId).emit('player-killed', randomTarget, room.phase);
+    }
   }
 
   // Clear votes
@@ -136,7 +157,13 @@ function startPhaseTimer(roomId) {
 }
 
 io.on('connection', (socket) => {
-  socket.on('join-room', (roomId, peerId, userName) => {
+  socket.on('join-room', (roomId, peerId, userName, localScore = 0) => {
+    // Odada oyun başladıysa girişi engelle
+    if (rooms[roomId] && (rooms[roomId].state === 'playing' || rooms[roomId].state === 'finished')) {
+      socket.emit('join-rejected', 'Oyun çoktan başladı! Gecenin geçmesini veya oyunun bitmesini bekleyin.');
+      return;
+    }
+
     socket.join(roomId);
 
     if (!rooms[roomId]) {
@@ -151,7 +178,7 @@ io.on('connection', (socket) => {
       };
     }
 
-    rooms[roomId].players[peerId] = { userName, role: null, socketId: socket.id, isDead: false };
+    rooms[roomId].players[peerId] = { userName, role: null, socketId: socket.id, isDead: false, score: localScore };
 
     socket.emit('room-info', { 
       host: rooms[roomId].host, 
