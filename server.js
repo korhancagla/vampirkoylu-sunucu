@@ -114,9 +114,15 @@ function processNightKills(roomId) {
   // Store the victim temporarily for the Dawn phase
   if (!isTie && targetToKill && room.players[targetToKill]) {
     room.nightVictim = targetToKill;
+    // Emit partial round data right after night voting so table updates immediately
+    room.currentRoundData.nightVictim = room.players[targetToKill].userName;
+    room.currentRoundData.healed = false; // Unknown yet, will update in dawn
   } else {
     room.nightVictim = null;
   }
+
+  // Emit partial currentRoundData so clients see night outcome immediately
+  io.to(roomId).emit('current-round-updated', Object.assign({}, room.currentRoundData));
 
   room.votes = {};
   io.to(roomId).emit('votes-cleared');
@@ -204,6 +210,9 @@ function processDawnResolution(roomId) {
    if (healedTarget && healedTarget !== room.nightVictim && room.players[healedTarget]) {
       io.to(room.players[healedTarget].socketId).emit('healed-empty'); // Fake heal notification for them
    }
+
+   // Emit updated currentRoundData after dawn so healed status is reflected immediately
+   io.to(roomId).emit('current-round-updated', Object.assign({}, room.currentRoundData));
 
    room.nightVictim = null;
    room.nightFlavor = null;
