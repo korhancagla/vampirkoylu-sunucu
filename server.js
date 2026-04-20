@@ -65,9 +65,17 @@ function checkGameOver(roomId) {
     const rolesMap = {};
     Object.entries(room.players).forEach(([id, p]) => {
       rolesMap[id] = { userName: p.userName, role: p.role, isDead: p.isDead, score: p.score || 0 };
-      // Turn spectators into normal players for next game lobby
       if (p.role === 'spectator') p.role = null;
     });
+
+    // Save this game's rounds to gamesHistory before clearing roundsData
+    if (!room.gamesHistory) room.gamesHistory = [];
+    room.gamesHistory.push({
+      gameNumber: room.gameNumber || room.gamesHistory.length + 1,
+      rounds: room.roundsData.slice() // snapshot
+    });
+    // Emit updated gamesHistory along with game-over
+    io.to(roomId).emit('games-history-updated', room.gamesHistory);
 
     console.log(`[Room ${roomId}] GAME OVER - Winner: ${winner}`);
     io.to(roomId).emit('game-over', { winner, playersDetails: rolesMap });
@@ -114,14 +122,13 @@ function processNightKills(roomId) {
   // Store the victim temporarily for the Dawn phase
   if (!isTie && targetToKill && room.players[targetToKill]) {
     room.nightVictim = targetToKill;
-    // Emit partial round data right after night voting so table updates immediately
     room.currentRoundData.nightVictim = room.players[targetToKill].userName;
-    room.currentRoundData.healed = false; // Unknown yet, will update in dawn
+    room.currentRoundData.healed = false;
+    room.currentRoundData.nightKillFlavor = room.nightFlavor || 'Vampir katliamı';
   } else {
     room.nightVictim = null;
   }
 
-  // Emit partial currentRoundData so clients see night outcome immediately
   io.to(roomId).emit('current-round-updated', Object.assign({}, room.currentRoundData));
 
   room.votes = {};
@@ -175,8 +182,9 @@ function processDayExecution(roomId) {
   room.roundsData.push(Object.assign({}, room.currentRoundData));
   io.to(roomId).emit('history-updated', room.history, room.roundsData);
   
-  // Reset for next round
-  room.currentRoundData = { round: room.round + 1, dayVotes: {}, dayVictim: null, nightVictim: null, healed: false, isTie: false };
+  // Increment round THEN reset currentRoundData for next round
+  room.round += 1;
+  room.currentRoundData = { round: room.round, dayVotes: {}, dayVictim: null, nightVictim: null, healed: false, nightKillFlavor: '', isTie: false };
 
   room.votes = {};
   io.to(roomId).emit('votes-cleared');
@@ -292,8 +300,9 @@ io.on('connection', (socket) => {
         admin: peerId,
         moderator: null,
         state: 'lobby',
-        phase: 'day', // Default lobby
+        phase: 'day',
         round: 1,
+        gameNumber: 1,
         players: {},
         votes: {},
         nightVictim: null,
@@ -301,7 +310,8 @@ io.on('connection', (socket) => {
         timeLeft: 0,
         timerInterval: null,
         history: [],
-        roundsData: [], // Tabular data summary per round
+        roundsData: [],
+        gamesHistory: [], // Array of completed games [{gameNumber, rounds:[...]}]
         settings: {
            dayDuration: 20,
            nightDuration: 10,
@@ -330,7 +340,8 @@ io.on('connection', (socket) => {
       phase: rooms[roomId].phase,
       settings: rooms[roomId].settings,
       history: rooms[roomId].history,
-      roundsData: rooms[roomId].roundsData || []
+      roundsData: rooms[roomId].roundsData || [],
+      gamesHistory: rooms[roomId].gamesHistory || []
     });
 
     socket.to(roomId).emit('user-connected', peerId, userName);
@@ -391,7 +402,8 @@ io.on('connection', (socket) => {
         room.round = 1;
         room.history = [];
         room.roundsData = [];
-        room.currentRoundData = { round: 1, dayVotes: {}, dayVictim: null, nightVictim: null, healed: false };
+        room.currentRoundData = { round: 1, dayVotes: {}, dayVictim: null, nightVictim: null, healed: false, nightKillFlavor: '' };
+        // Note: gamesHistory is NOT reset here — it persists across games in the same room
 
         const playerIds = Object.keys(room.players);
         
@@ -495,6 +507,7 @@ io.on('connection', (socket) => {
         room.state = 'lobby';
         room.phase = 'day';
         room.votes = {};
+        room.gameNumber = (room.gameNumber || 1) + 1;
         Object.values(room.players).forEach(p => {
           if (p.role !== 'spectator') {
              p.role = null;
