@@ -319,6 +319,7 @@ io.on('connection', (socket) => {
            vampireCount: 1,
            modEnabled: false,
            healerEnabled: false,
+           silentNight: false,
            winScore: 5
         }
       };
