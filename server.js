@@ -212,7 +212,12 @@ function startPhaseTimer(roomId) {
       // Execute end of phase actions
       if (room.phase === 'night') {
          processNightKills(roomId);
-         room.phase = room.settings.healerEnabled ? 'dawn' : 'day';
+         if (room.settings.healerEnabled) {
+             room.phase = 'dawn';
+         } else {
+             isGameOver = processDawnResolution(roomId);
+             room.phase = 'day';
+         }
       } else if (room.phase === 'dawn') {
          isGameOver = processDawnResolution(roomId);
          room.phase = 'day';
