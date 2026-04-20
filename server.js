@@ -145,12 +145,32 @@ function processDayExecution(roomId) {
     }
   });
 
+  // Compile dayVotes using user names!
+  const translatedDayVotes = {};
+  Object.entries(room.votes).forEach(([voterId, targetId]) => {
+     if (room.players[voterId] && room.players[targetId]) {
+         translatedDayVotes[room.players[voterId].userName] = room.players[targetId].userName;
+     }
+  });
+  room.currentRoundData.dayVotes = translatedDayVotes;
+
   if (!isTie && targetToKill && room.players[targetToKill]) {
+    room.currentRoundData.dayVictim = room.players[targetToKill].userName;
+    room.currentRoundData.isTie = false;
     room.players[targetToKill].isDead = true;
     room.history.push({ round: room.round, phase: 'day', event: `${room.players[targetToKill].userName} kasaba halkı tarafından idam edildi.`, flavor: ''});
     io.to(roomId).emit('player-killed', targetToKill, 'day', 'halk idamı');
-    io.to(roomId).emit('history-updated', room.history);
+  } else {
+    room.currentRoundData.dayVictim = null;
+    room.currentRoundData.isTie = isTie;
   }
+  
+  // Push the compiled round to roundsData array!
+  room.roundsData.push(Object.assign({}, room.currentRoundData));
+  io.to(roomId).emit('history-updated', room.history, room.roundsData);
+  
+  // Reset for next round
+  room.currentRoundData = { round: room.round + 1, dayVotes: {}, dayVictim: null, nightVictim: null, healed: false, isTie: false };
 
   room.votes = {};
   io.to(roomId).emit('votes-cleared');
@@ -167,14 +187,18 @@ function processDawnResolution(roomId) {
 
    if (room.nightVictim) {
       if (healedTarget === room.nightVictim) {
+         room.currentRoundData.nightVictim = room.players[room.nightVictim].userName;
+         room.currentRoundData.healed = true;
          io.to(roomId).emit('player-saved', room.nightVictim);
          room.history.push({ round: room.round, phase: 'night', event: `Vampirler saldırdı ama Şifacı kurbanı son anda kurtardı!`, flavor: room.nightFlavor || ''});
       } else {
+         room.currentRoundData.nightVictim = room.players[room.nightVictim].userName;
+         room.currentRoundData.healed = false;
          room.players[room.nightVictim].isDead = true;
          room.history.push({ round: room.round, phase: 'night', event: `${room.players[room.nightVictim].userName} vampirler tarafından parçalandı.`, flavor: room.nightFlavor || ''});
          io.to(roomId).emit('player-killed', room.nightVictim, 'night', room.nightFlavor || 'Kanı emildi');
       }
-      io.to(roomId).emit('history-updated', room.history);
+      io.to(roomId).emit('history-updated', room.history, room.roundsData);
    }
    
    if (healedTarget && healedTarget !== room.nightVictim && room.players[healedTarget]) {
@@ -268,6 +292,7 @@ io.on('connection', (socket) => {
         timeLeft: 0,
         timerInterval: null,
         history: [],
+        roundsData: [], // Tabular data summary per round
         settings: {
            dayDuration: 20,
            nightDuration: 10,
@@ -295,7 +320,8 @@ io.on('connection', (socket) => {
       state: rooms[roomId].state,
       phase: rooms[roomId].phase,
       settings: rooms[roomId].settings,
-      history: rooms[roomId].history
+      history: rooms[roomId].history,
+      roundsData: rooms[roomId].roundsData || []
     });
 
     socket.to(roomId).emit('user-connected', peerId, userName);
@@ -355,6 +381,8 @@ io.on('connection', (socket) => {
         room.phase = 'night'; // Start with Night
         room.round = 1;
         room.history = [];
+        room.roundsData = [];
+        room.currentRoundData = { round: 1, dayVotes: {}, dayVictim: null, nightVictim: null, healed: false };
 
         const playerIds = Object.keys(room.players);
         
