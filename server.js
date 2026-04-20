@@ -345,6 +345,11 @@ io.on('connection', (socket) => {
 
     rooms[roomId].players[peerId] = { userName, role: null, socketId: socket.id, isDead: false, score: localScore };
 
+    const publicPlayers = {};
+    Object.entries(rooms[roomId].players).forEach(([id, p]) => {
+      publicPlayers[id] = { userName: p.userName, score: p.score || 0, isDead: p.isDead };
+    });
+
     socket.emit('room-info', { 
       admin: rooms[roomId].admin,
       moderator: rooms[roomId].moderator,
@@ -353,10 +358,11 @@ io.on('connection', (socket) => {
       settings: rooms[roomId].settings,
       history: rooms[roomId].history,
       roundsData: rooms[roomId].roundsData || [],
-      gamesHistory: rooms[roomId].gamesHistory || []
+      gamesHistory: rooms[roomId].gamesHistory || [],
+      playersBase: publicPlayers
     });
 
-    socket.to(roomId).emit('user-connected', peerId, userName);
+    socket.to(roomId).emit('user-connected', peerId, userName, null, localScore);
 
     socket.on('approve-spectator', (specData, isApproved) => {
        const room = rooms[roomId];
@@ -373,20 +379,28 @@ io.on('connection', (socket) => {
           targetSocket.join(roomId);
           room.players[specData.peerId] = { userName: specData.userName, role: 'spectator', socketId: specData.socketId, isDead: true, score: specData.localScore };
           
+          const publicPlayers = {};
+          Object.entries(room.players).forEach(([id, p]) => {
+            publicPlayers[id] = { userName: p.userName, score: p.score || 0, isDead: p.isDead };
+          });
+
           targetSocket.emit('room-info', {
              admin: room.admin,
              moderator: room.moderator,
              state: room.state,
              phase: room.phase,
              settings: room.settings,
-             history: room.history
+             history: room.history,
+             roundsData: room.roundsData || [],
+             gamesHistory: room.gamesHistory || [],
+             playersBase: publicPlayers
           });
           
           // Force their UI to recognize playing state and spectator role
           targetSocket.emit('game-started', { phase: room.phase });
           targetSocket.emit('role-assigned', 'spectator');
 
-          io.to(roomId).emit('user-connected', specData.peerId, specData.userName, 'spectator');
+          io.to(roomId).emit('user-connected', specData.peerId, specData.userName, 'spectator', specData.localScore);
        }
     });
 
