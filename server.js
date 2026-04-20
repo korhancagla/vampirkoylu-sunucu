@@ -407,10 +407,29 @@ io.on('connection', (socket) => {
 
     socket.on('end-phase-early', () => {
       const room = rooms[roomId];
-      if (room && room.moderator === peerId && room.state === 'playing') {
-         // Moderatör süreyi sonlandırdı
-         room.timeLeft = 1; 
+      if (room && room.state === 'playing') {
+         // Moderatör süreyi sonlandırdı (Either explicit moderator or auto-mod admin)
+         const isActiveModerator = (room.moderator === peerId) || (!room.moderator && room.admin === peerId);
+         if (isActiveModerator) {
+             room.timeLeft = 1; 
+         }
       }
+    });
+
+    socket.on('transfer-admin', (newAdminId) => {
+       const room = rooms[roomId];
+       if (room && room.admin === peerId && room.state === 'lobby') {
+           if (room.players[newAdminId]) {
+               room.admin = newAdminId;
+               io.to(roomId).emit('admin-changed', newAdminId);
+               
+               // Update roles appropriately
+               if (room.moderator === newAdminId) {
+                   room.moderator = null; // New admin cannot be the explicit mod assigned, they become auto-mod
+                   io.to(roomId).emit('moderator-changed', null);
+               }
+           }
+       }
     });
 
     socket.on('kill-flavor-text', (text) => {
