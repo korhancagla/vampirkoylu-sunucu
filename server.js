@@ -359,7 +359,8 @@ io.on('connection', (socket) => {
       history: rooms[roomId].history,
       roundsData: rooms[roomId].roundsData || [],
       gamesHistory: rooms[roomId].gamesHistory || [],
-      playersBase: publicPlayers
+      playersBase: publicPlayers,
+      customRolesMap: rooms[roomId].customRolesMap || {}
     });
 
     socket.to(roomId).emit('user-connected', peerId, userName, null, localScore);
@@ -393,7 +394,8 @@ io.on('connection', (socket) => {
           history: room.history,
           roundsData: room.roundsData || [],
           gamesHistory: room.gamesHistory || [],
-          playersBase: publicPlayers
+          playersBase: publicPlayers,
+          customRolesMap: room.customRolesMap || {}
         });
 
         // Force their UI to recognize playing state and spectator role
@@ -420,9 +422,23 @@ io.on('connection', (socket) => {
       }
     });
 
-    socket.on('start-game', (customRolesMap) => { // Moderatör role map gönderebilir
+    socket.on('update-custom-roles', (roleData) => {
+      const room = rooms[roomId];
+      if (room && room.state === 'lobby' && (room.admin === peerId || room.moderator === peerId)) {
+        if (!room.customRolesMap) room.customRolesMap = {};
+        if (roleData.role === '') {
+          delete room.customRolesMap[roleData.targetId];
+        } else {
+          room.customRolesMap[roleData.targetId] = roleData.role;
+        }
+        io.to(roomId).emit('custom-roles-updated', room.customRolesMap);
+      }
+    });
+
+    socket.on('start-game', (clientCustomRolesMap) => { // Moderatör role map gönderebilir
       const room = rooms[roomId];
       if (room && (room.admin === peerId || room.moderator === peerId) && room.state === 'lobby') {
+        const customRolesMap = Object.keys(clientCustomRolesMap || {}).length > 0 ? clientCustomRolesMap : (room.customRolesMap || {});
         room.state = 'playing';
         room.phase = 'night'; // Start with Night
         room.round = 1;
@@ -534,6 +550,7 @@ io.on('connection', (socket) => {
         room.phase = 'day';
         room.votes = {};
         room.gameNumber = (room.gameNumber || 1) + 1;
+        room.customRolesMap = {}; // Reset custom roles
         Object.values(room.players).forEach(p => {
           if (p.role !== 'spectator') {
             p.role = null;
