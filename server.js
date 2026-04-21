@@ -343,7 +343,8 @@ io.on('connection', (socket) => {
       return;
     }
 
-    rooms[roomId].players[peerId] = { userName, role: null, socketId: socket.id, isDead: false, score: localScore };
+    const parsedScore = Number(localScore) || 0;
+    rooms[roomId].players[peerId] = { userName, role: null, socketId: socket.id, isDead: false, score: parsedScore };
 
     const publicPlayers = {};
     Object.entries(rooms[roomId].players).forEach(([id, p]) => {
@@ -378,7 +379,8 @@ io.on('connection', (socket) => {
       const targetSocket = io.sockets.sockets.get(specData.socketId);
       if (targetSocket) {
         targetSocket.join(roomId);
-        room.players[specData.peerId] = { userName: specData.userName, role: 'spectator', socketId: specData.socketId, isDead: true, score: specData.localScore };
+        const parsedScore = Number(specData.localScore) || 0;
+        room.players[specData.peerId] = { userName: specData.userName, role: 'spectator', socketId: specData.socketId, isDead: true, score: parsedScore };
 
         const publicPlayers = {};
         Object.entries(room.players).forEach(([id, p]) => {
