@@ -35,7 +35,7 @@ function checkGameOver(roomId) {
 
   let aliveVampires = 0;
   let aliveVillagers = 0;
-  
+
   Object.values(room.players).forEach(p => {
     if (!p.isDead && p.role !== 'moderator' && p.role !== 'spectator') {
       if (p.role === 'vampire') aliveVampires++;
@@ -50,24 +50,24 @@ function checkGameOver(roomId) {
   if (winner) {
     clearTimer(room);
     room.state = 'finished';
-    
+
     // Ensure the last round is pushed if it hasn't been yet (e.g. game ended at dawn)
     if (room.currentRoundData && (room.currentRoundData.nightVictim || room.currentRoundData.dayVictim)) {
-       const alreadyPushed = room.roundsData.length > 0 && room.roundsData[room.roundsData.length-1].round === room.currentRoundData.round;
-       if (!alreadyPushed) {
-          room.roundsData.push(Object.assign({}, room.currentRoundData));
-       }
+      const alreadyPushed = room.roundsData.length > 0 && room.roundsData[room.roundsData.length - 1].round === room.currentRoundData.round;
+      if (!alreadyPushed) {
+        room.roundsData.push(Object.assign({}, room.currentRoundData));
+      }
     }
 
-    
+
     // Update Scores based on new Phase 4 rules
     Object.values(room.players).forEach(p => {
       if (winner === 'villagers' && (p.role === 'villager' || p.role === 'healer')) {
-         p.score = (p.score || 0) + 1;
-         if (!p.isDead) p.score += 1; // +1 extra for surviving!
+        p.score = (p.score || 0) + 1;
+        if (!p.isDead) p.score += 1; // +1 extra for surviving!
       } else if (winner === 'vampires' && p.role === 'vampire') {
-         p.score = (p.score || 0) + 2;
-         if (!p.isDead && aliveVampires === 1) p.score += 1; // +1 extra if sole survivor!
+        p.score = (p.score || 0) + 2;
+        if (!p.isDead && aliveVampires === 1) p.score += 1; // +1 extra if sole survivor!
       }
     });
 
@@ -96,7 +96,7 @@ function checkGameOver(roomId) {
 function processNightKills(roomId) {
   const room = rooms[roomId];
   if (!room) return;
-  
+
   const voteCounts = {};
   Object.values(room.votes).forEach(targetId => {
     voteCounts[targetId] = (voteCounts[targetId] || 0) + 1;
@@ -170,9 +170,9 @@ function processDayExecution(roomId) {
   // Compile dayVotes using user names!
   const translatedDayVotes = {};
   Object.entries(room.votes).forEach(([voterId, targetId]) => {
-     if (room.players[voterId] && room.players[targetId]) {
-         translatedDayVotes[room.players[voterId].userName] = room.players[targetId].userName;
-     }
+    if (room.players[voterId] && room.players[targetId]) {
+      translatedDayVotes[room.players[voterId].userName] = room.players[targetId].userName;
+    }
   });
   room.currentRoundData.dayVotes = translatedDayVotes;
 
@@ -180,17 +180,17 @@ function processDayExecution(roomId) {
     room.currentRoundData.dayVictim = room.players[targetToKill].userName;
     room.currentRoundData.isTie = false;
     room.players[targetToKill].isDead = true;
-    room.history.push({ round: room.round, phase: 'day', event: `${room.players[targetToKill].userName} kasaba halkı tarafından idam edildi.`, flavor: ''});
+    room.history.push({ round: room.round, phase: 'day', event: `${room.players[targetToKill].userName} kasaba halkı tarafından idam edildi.`, flavor: '' });
     io.to(roomId).emit('player-killed', targetToKill, 'day', 'halk idamı');
   } else {
     room.currentRoundData.dayVictim = null;
     room.currentRoundData.isTie = isTie;
   }
-  
+
   // Push the compiled round to roundsData array!
   room.roundsData.push(Object.assign({}, room.currentRoundData));
   io.to(roomId).emit('history-updated', room.history, room.roundsData);
-  
+
   // Increment round THEN reset currentRoundData for next round
   room.round += 1;
   room.currentRoundData = { round: room.round, dayVotes: {}, dayVictim: null, nightVictim: null, healed: false, nightKillFlavor: '', isTie: false };
@@ -203,41 +203,41 @@ function processDayExecution(roomId) {
 }
 
 function processDawnResolution(roomId) {
-   const room = rooms[roomId];
-   if (!room) return;
+  const room = rooms[roomId];
+  if (!room) return;
 
-   // Check healer's vote
-   const healerVotes = Object.values(room.votes);
-   const healedTarget = healerVotes.length > 0 ? healerVotes[0] : null;
+  // Check healer's vote
+  const healerVotes = Object.values(room.votes);
+  const healedTarget = healerVotes.length > 0 ? healerVotes[0] : null;
 
-   if (room.nightVictim) {
-      if (healedTarget === room.nightVictim) {
-         room.currentRoundData.nightVictim = room.players[room.nightVictim].userName;
-         room.currentRoundData.healed = true;
-         io.to(roomId).emit('player-saved', room.nightVictim);
-         room.history.push({ round: room.round, phase: 'night', event: `Vampirler saldırdı ama Şifacı kurbanı son anda kurtardı!`, flavor: room.nightFlavor || ''});
-      } else {
-         room.currentRoundData.nightVictim = room.players[room.nightVictim].userName;
-         room.currentRoundData.healed = false;
-         room.players[room.nightVictim].isDead = true;
-         room.history.push({ round: room.round, phase: 'night', event: `${room.players[room.nightVictim].userName} vampirler tarafından parçalandı.`, flavor: room.nightFlavor || ''});
-         io.to(roomId).emit('player-killed', room.nightVictim, 'night', room.nightFlavor || 'Kanı emildi');
-      }
-      io.to(roomId).emit('history-updated', room.history, room.roundsData);
-   }
-   
-   if (healedTarget && healedTarget !== room.nightVictim && room.players[healedTarget]) {
-      io.to(room.players[healedTarget].socketId).emit('healed-empty'); // Fake heal notification for them
-   }
+  if (room.nightVictim) {
+    if (healedTarget === room.nightVictim) {
+      room.currentRoundData.nightVictim = room.players[room.nightVictim].userName;
+      room.currentRoundData.healed = true;
+      io.to(roomId).emit('player-saved', room.nightVictim);
+      room.history.push({ round: room.round, phase: 'night', event: `Vampirler saldırdı ama Şifacı kurbanı son anda kurtardı!`, flavor: room.nightFlavor || '' });
+    } else {
+      room.currentRoundData.nightVictim = room.players[room.nightVictim].userName;
+      room.currentRoundData.healed = false;
+      room.players[room.nightVictim].isDead = true;
+      room.history.push({ round: room.round, phase: 'night', event: `${room.players[room.nightVictim].userName} vampirler tarafından parçalandı.`, flavor: room.nightFlavor || '' });
+      io.to(roomId).emit('player-killed', room.nightVictim, 'night', room.nightFlavor || 'Kanı emildi');
+    }
+    io.to(roomId).emit('history-updated', room.history, room.roundsData);
+  }
 
-   // Emit updated currentRoundData after dawn so healed status is reflected immediately
-   io.to(roomId).emit('current-round-updated', Object.assign({}, room.currentRoundData));
+  if (healedTarget && healedTarget !== room.nightVictim && room.players[healedTarget]) {
+    io.to(room.players[healedTarget].socketId).emit('healed-empty'); // Fake heal notification for them
+  }
 
-   room.nightVictim = null;
-   room.nightFlavor = null;
-   room.votes = {};
-   io.to(roomId).emit('votes-cleared');
-   return checkGameOver(roomId);
+  // Emit updated currentRoundData after dawn so healed status is reflected immediately
+  io.to(roomId).emit('current-round-updated', Object.assign({}, room.currentRoundData));
+
+  room.nightVictim = null;
+  room.nightFlavor = null;
+  room.votes = {};
+  io.to(roomId).emit('votes-cleared');
+  return checkGameOver(roomId);
 }
 
 function startPhaseTimer(roomId) {
@@ -245,7 +245,7 @@ function startPhaseTimer(roomId) {
   if (!room || room.state !== 'playing') return;
 
   clearTimer(room);
-  
+
   if (room.phase === 'day') room.timeLeft = room.settings.dayDuration || 20;
   else if (room.phase === 'dawn') room.timeLeft = room.settings.dawnDuration || 10;
   else room.timeLeft = room.settings.nightDuration || 10;
@@ -263,26 +263,26 @@ function startPhaseTimer(roomId) {
 
       // Execute end of phase actions
       if (room.phase === 'night') {
-         processNightKills(roomId);
-         if (room.settings.healerEnabled) {
-             room.phase = 'dawn';
-         } else {
-             isGameOver = processDawnResolution(roomId);
-             room.phase = 'day';
-         }
+        processNightKills(roomId);
+        if (room.settings.healerEnabled) {
+          room.phase = 'dawn';
+        } else {
+          isGameOver = processDawnResolution(roomId);
+          room.phase = 'day';
+        }
       } else if (room.phase === 'dawn') {
-         isGameOver = processDawnResolution(roomId);
-         room.phase = 'day';
+        isGameOver = processDawnResolution(roomId);
+        room.phase = 'day';
       } else if (room.phase === 'day') {
-         room.round += 1;
-         isGameOver = processDayExecution(roomId);
-         room.phase = 'night';
+        room.round += 1;
+        isGameOver = processDayExecution(roomId);
+        room.phase = 'night';
       }
-      
+
       if (isGameOver) return;
-      
+
       io.to(roomId).emit('phase-changed', room.phase);
-      
+
       setTimeout(() => {
         startPhaseTimer(roomId);
       }, 2000);
@@ -296,10 +296,10 @@ io.on('connection', (socket) => {
     if (rooms[roomId] && (rooms[roomId].state === 'playing' || rooms[roomId].state === 'finished')) {
       const adminSocket = rooms[roomId].players[rooms[roomId].admin]?.socketId;
       if (adminSocket) {
-         io.to(adminSocket).emit('spectator-request', { peerId, userName, socketId: socket.id, localScore });
-         socket.emit('spectator-pending', 'Oyun şu an devam ediyor. Odadaki yöneticiden giriş onayı bekleniyor...');
+        io.to(adminSocket).emit('spectator-request', { peerId, userName, socketId: socket.id, localScore });
+        socket.emit('spectator-pending', 'Oyun şu an devam ediyor. Odadaki yöneticiden giriş onayı bekleniyor...');
       } else {
-         socket.emit('join-rejected', 'Oyun şu an devam ediyor ve yönetici onayı alınamıyor.');
+        socket.emit('join-rejected', 'Oyun şu an devam ediyor ve yönetici onayı alınamıyor.');
       }
       return;
     }
@@ -324,14 +324,14 @@ io.on('connection', (socket) => {
         roundsData: [],
         gamesHistory: [], // Array of completed games [{gameNumber, rounds:[...]}]
         settings: {
-           dayDuration: 20,
-           nightDuration: 10,
-           dawnDuration: 10,
-           vampireCount: 1,
-           modEnabled: false,
-           healerEnabled: false,
-           silentNight: false,
-           winScore: 5
+          dayDuration: 20,
+          nightDuration: 15,
+          dawnDuration: 15,
+          vampireCount: 1,
+          modEnabled: false,
+          healerEnabled: false,
+          silentNight: false,
+          winScore: 5
         }
       };
     }
@@ -339,8 +339,8 @@ io.on('connection', (socket) => {
     // Check duplicate names
     const existingName = Object.values(rooms[roomId].players).find(p => p.userName === userName);
     if (existingName) {
-       socket.emit('join-rejected', 'Bu isimde bir oyuncu içeride zaten var. Lütfen farklı bir isim seçin.');
-       return;
+      socket.emit('join-rejected', 'Bu isimde bir oyuncu içeride zaten var. Lütfen farklı bir isim seçin.');
+      return;
     }
 
     rooms[roomId].players[peerId] = { userName, role: null, socketId: socket.id, isDead: false, score: localScore };
@@ -350,7 +350,7 @@ io.on('connection', (socket) => {
       publicPlayers[id] = { userName: p.userName, score: p.score || 0, isDead: p.isDead };
     });
 
-    socket.emit('room-info', { 
+    socket.emit('room-info', {
       admin: rooms[roomId].admin,
       moderator: rooms[roomId].moderator,
       state: rooms[roomId].state,
@@ -365,59 +365,59 @@ io.on('connection', (socket) => {
     socket.to(roomId).emit('user-connected', peerId, userName, null, localScore);
 
     socket.on('approve-spectator', (specData, isApproved) => {
-       const room = rooms[roomId];
-       if (!room || room.admin !== peerId) return;
+      const room = rooms[roomId];
+      if (!room || room.admin !== peerId) return;
 
-       if (!isApproved) {
-          io.to(specData.socketId).emit('join-rejected', 'Yönetici girişinize izin vermedi.');
-          return;
-       }
+      if (!isApproved) {
+        io.to(specData.socketId).emit('join-rejected', 'Yönetici girişinize izin vermedi.');
+        return;
+      }
 
-       // Make them join the room!
-       const targetSocket = io.sockets.sockets.get(specData.socketId);
-       if (targetSocket) {
-          targetSocket.join(roomId);
-          room.players[specData.peerId] = { userName: specData.userName, role: 'spectator', socketId: specData.socketId, isDead: true, score: specData.localScore };
-          
-          const publicPlayers = {};
-          Object.entries(room.players).forEach(([id, p]) => {
-            publicPlayers[id] = { userName: p.userName, score: p.score || 0, isDead: p.isDead };
-          });
+      // Make them join the room!
+      const targetSocket = io.sockets.sockets.get(specData.socketId);
+      if (targetSocket) {
+        targetSocket.join(roomId);
+        room.players[specData.peerId] = { userName: specData.userName, role: 'spectator', socketId: specData.socketId, isDead: true, score: specData.localScore };
 
-          targetSocket.emit('room-info', {
-             admin: room.admin,
-             moderator: room.moderator,
-             state: room.state,
-             phase: room.phase,
-             settings: room.settings,
-             history: room.history,
-             roundsData: room.roundsData || [],
-             gamesHistory: room.gamesHistory || [],
-             playersBase: publicPlayers
-          });
-          
-          // Force their UI to recognize playing state and spectator role
-          targetSocket.emit('game-started', { phase: room.phase });
-          targetSocket.emit('role-assigned', 'spectator');
+        const publicPlayers = {};
+        Object.entries(room.players).forEach(([id, p]) => {
+          publicPlayers[id] = { userName: p.userName, score: p.score || 0, isDead: p.isDead };
+        });
 
-          io.to(roomId).emit('user-connected', specData.peerId, specData.userName, 'spectator', specData.localScore);
-       }
+        targetSocket.emit('room-info', {
+          admin: room.admin,
+          moderator: room.moderator,
+          state: room.state,
+          phase: room.phase,
+          settings: room.settings,
+          history: room.history,
+          roundsData: room.roundsData || [],
+          gamesHistory: room.gamesHistory || [],
+          playersBase: publicPlayers
+        });
+
+        // Force their UI to recognize playing state and spectator role
+        targetSocket.emit('game-started', { phase: room.phase });
+        targetSocket.emit('role-assigned', 'spectator');
+
+        io.to(roomId).emit('user-connected', specData.peerId, specData.userName, 'spectator', specData.localScore);
+      }
     });
 
     socket.on('update-settings', (newSettings) => {
-       const room = rooms[roomId];
-       if (room && room.admin === peerId && room.state === 'lobby') {
-          room.settings = { ...room.settings, ...newSettings };
-          io.to(roomId).emit('settings-updated', room.settings);
-       }
+      const room = rooms[roomId];
+      if (room && room.admin === peerId && room.state === 'lobby') {
+        room.settings = { ...room.settings, ...newSettings };
+        io.to(roomId).emit('settings-updated', room.settings);
+      }
     });
 
     socket.on('assign-moderator', (targetId) => {
-       const room = rooms[roomId];
-       if (room && room.admin === peerId && room.state === 'lobby' && room.settings.modEnabled) {
-          room.moderator = targetId;
-          io.to(roomId).emit('moderator-assigned', targetId);
-       }
+      const room = rooms[roomId];
+      if (room && room.admin === peerId && room.state === 'lobby' && room.settings.modEnabled) {
+        room.moderator = targetId;
+        io.to(roomId).emit('moderator-assigned', targetId);
+      }
     });
 
     socket.on('start-game', (customRolesMap) => { // Moderatör role map gönderebilir
@@ -432,39 +432,39 @@ io.on('connection', (socket) => {
         // Note: gamesHistory is NOT reset here — it persists across games in the same room
 
         const playerIds = Object.keys(room.players);
-        
+
         // Setup moderator if active but not selected, auto select
         if (room.settings.modEnabled && !room.moderator) {
-           room.moderator = peerId; // System auto assigns admin
+          room.moderator = peerId; // System auto assigns admin
         }
-        
+
         // Define Players
         let playableIds = playerIds;
         if (room.settings.modEnabled && room.moderator) {
-           room.players[room.moderator].role = 'moderator';
-           playableIds = playerIds.filter(id => id !== room.moderator);
+          room.players[room.moderator].role = 'moderator';
+          playableIds = playerIds.filter(id => id !== room.moderator);
         }
 
         if (customRolesMap && Object.keys(customRolesMap).length > 0) {
-           // Mod defined roles
-           playableIds.forEach(id => {
-              room.players[id].role = customRolesMap[id] || 'villager';
-              room.players[id].isDead = false;
-           });
+          // Mod defined roles
+          playableIds.forEach(id => {
+            room.players[id].role = customRolesMap[id] || 'villager';
+            room.players[id].isDead = false;
+          });
         } else {
-           // Auto Random
-           for (let i = playableIds.length - 1; i > 0; i--) {
-               const j = Math.floor(Math.random() * (i + 1));
-               [playableIds[i], playableIds[j]] = [playableIds[j], playableIds[i]];
-           }
-           const vCount = Math.min(room.settings.vampireCount, playableIds.length - 1);
-           playableIds.forEach((id, index) => {
-             let role = 'villager';
-             if (index < vCount) role = 'vampire';
-             else if (index === vCount && room.settings.healerEnabled) role = 'healer';
-             room.players[id].role = role;
-             room.players[id].isDead = false;
-           });
+          // Auto Random
+          for (let i = playableIds.length - 1; i > 0; i--) {
+            const j = Math.floor(Math.random() * (i + 1));
+            [playableIds[i], playableIds[j]] = [playableIds[j], playableIds[i]];
+          }
+          const vCount = Math.min(room.settings.vampireCount, playableIds.length - 1);
+          playableIds.forEach((id, index) => {
+            let role = 'villager';
+            if (index < vCount) role = 'vampire';
+            else if (index === vCount && room.settings.healerEnabled) role = 'healer';
+            room.players[id].role = role;
+            room.players[id].isDead = false;
+          });
         }
 
         // Emit assignments
@@ -473,9 +473,9 @@ io.on('connection', (socket) => {
         });
 
         io.to(roomId).emit('game-started', { phase: 'night' });
-        
+
         setTimeout(() => {
-           startPhaseTimer(roomId);
+          startPhaseTimer(roomId);
         }, 3000); // 3s buffer for slap animations
       }
     });
@@ -483,35 +483,35 @@ io.on('connection', (socket) => {
     socket.on('end-phase-early', () => {
       const room = rooms[roomId];
       if (room && room.state === 'playing') {
-         // Moderatör süreyi sonlandırdı (Either explicit moderator or auto-mod admin)
-         const isActiveModerator = (room.moderator === peerId) || (!room.moderator && room.admin === peerId);
-         if (isActiveModerator) {
-             room.timeLeft = 1; 
-         }
+        // Moderatör süreyi sonlandırdı (Either explicit moderator or auto-mod admin)
+        const isActiveModerator = (room.moderator === peerId) || (!room.moderator && room.admin === peerId);
+        if (isActiveModerator) {
+          room.timeLeft = 1;
+        }
       }
     });
 
     socket.on('transfer-admin', (newAdminId) => {
-       const room = rooms[roomId];
-       if (room && room.admin === peerId && room.state === 'lobby') {
-           if (room.players[newAdminId]) {
-               room.admin = newAdminId;
-               io.to(roomId).emit('admin-changed', newAdminId);
-               
-               // Update roles appropriately
-               if (room.moderator === newAdminId) {
-                   room.moderator = null; // New admin cannot be the explicit mod assigned, they become auto-mod
-                   io.to(roomId).emit('moderator-changed', null);
-               }
-           }
-       }
+      const room = rooms[roomId];
+      if (room && room.admin === peerId && room.state === 'lobby') {
+        if (room.players[newAdminId]) {
+          room.admin = newAdminId;
+          io.to(roomId).emit('admin-changed', newAdminId);
+
+          // Update roles appropriately
+          if (room.moderator === newAdminId) {
+            room.moderator = null; // New admin cannot be the explicit mod assigned, they become auto-mod
+            io.to(roomId).emit('moderator-changed', null);
+          }
+        }
+      }
     });
 
     socket.on('kill-flavor-text', (text) => {
-       const room = rooms[roomId];
-       if (room && room.phase === 'night' && room.players[peerId].role === 'vampire') {
-          room.nightFlavor = text;
-       }
+      const room = rooms[roomId];
+      if (room && room.phase === 'night' && room.players[peerId].role === 'vampire') {
+        room.nightFlavor = text;
+      }
     });
 
     socket.on('submit-vote', (targetPeerId) => {
@@ -520,7 +520,7 @@ io.on('connection', (socket) => {
         if (room.phase === 'dawn' && room.players[peerId].role !== 'healer') return;
         if (room.phase === 'night' && room.players[peerId].role !== 'vampire') return;
         if (room.players[targetPeerId] && room.players[targetPeerId].isDead) return;
-        
+
         room.votes[peerId] = targetPeerId;
         socket.emit('vote-acked', targetPeerId);
         broadcastVoteCounts(roomId);
@@ -536,8 +536,8 @@ io.on('connection', (socket) => {
         room.gameNumber = (room.gameNumber || 1) + 1;
         Object.values(room.players).forEach(p => {
           if (p.role !== 'spectator') {
-             p.role = null;
-             p.isDead = false;
+            p.role = null;
+            p.isDead = false;
           }
         });
         io.to(roomId).emit('returned-to-lobby');
@@ -549,22 +549,22 @@ io.on('connection', (socket) => {
       if (rooms[roomId]) {
         const wasAdmin = rooms[roomId].admin === peerId;
         const wasMod = rooms[roomId].moderator === peerId;
-        
+
         delete rooms[roomId].players[peerId];
         const remainingPlayers = Object.keys(rooms[roomId].players);
-        
+
         if (remainingPlayers.length === 0) {
           clearTimer(rooms[roomId]);
           delete rooms[roomId];
         } else {
-           if (wasAdmin) {
-              rooms[roomId].admin = wasMod && remainingPlayers.includes(rooms[roomId].moderator) ? rooms[roomId].moderator : remainingPlayers[0];
-              io.to(roomId).emit('admin-changed', rooms[roomId].admin);
-           }
-           if (wasMod) {
-              rooms[roomId].moderator = null;
-              io.to(roomId).emit('moderator-changed', null);
-           }
+          if (wasAdmin) {
+            rooms[roomId].admin = wasMod && remainingPlayers.includes(rooms[roomId].moderator) ? rooms[roomId].moderator : remainingPlayers[0];
+            io.to(roomId).emit('admin-changed', rooms[roomId].admin);
+          }
+          if (wasMod) {
+            rooms[roomId].moderator = null;
+            io.to(roomId).emit('moderator-changed', null);
+          }
         }
       }
     });
