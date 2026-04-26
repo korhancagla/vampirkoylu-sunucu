@@ -67,6 +67,12 @@ function emitRoomInfo(roomId, targetSocket = null) {
   }
 }
 
+function isValidCustomRole(room, role) {
+  if (role === '') return true;
+  if (role === 'villager' || role === 'vampire') return true;
+  return role === 'healer' && !!room.settings.healerEnabled;
+}
+
 function checkGameOver(roomId) {
   const room = rooms[roomId];
   if (!room || room.state !== 'playing') return false;
@@ -291,9 +297,6 @@ function startPhaseTimer(roomId) {
   else if (room.phase === 'dawn') room.timeLeft = room.settings.dawnDuration || 10;
   else room.timeLeft = room.settings.nightDuration || 10;
 
-  room.votes = {};
-  io.to(roomId).emit('votes-cleared');
-
   room.timerInterval = setInterval(() => {
     room.timeLeft -= 1;
     io.to(roomId).emit('timer-tick', room.timeLeft);
@@ -422,21 +425,40 @@ io.on('connection', (socket) => {
       const room = rooms[roomId];
       if (room && room.admin === peerId && room.state === 'lobby') {
         room.settings = { ...room.settings, ...newSettings };
+        if (!room.settings.modEnabled) {
+          room.moderator = null;
+        }
+        if (!room.settings.healerEnabled && room.customRolesMap) {
+          Object.entries(room.customRolesMap).forEach(([targetId, role]) => {
+            if (role === 'healer') delete room.customRolesMap[targetId];
+          });
+          io.to(roomId).emit('custom-roles-updated', room.customRolesMap);
+        }
+        io.to(roomId).emit('moderator-assigned', room.moderator);
         io.to(roomId).emit('settings-updated', room.settings);
+        emitRoomInfo(roomId);
       }
     });
 
     socket.on('assign-moderator', (targetId) => {
       const room = rooms[roomId];
-      if (room && room.admin === peerId && room.state === 'lobby' && room.settings.modEnabled) {
-        room.moderator = targetId;
-        io.to(roomId).emit('moderator-assigned', targetId);
+      if (room && room.admin === peerId && room.state === 'lobby') {
+        room.moderator = room.settings.modEnabled && targetId && room.players[targetId]?.role !== 'spectator' ? targetId : null;
+        if (!room.customRolesMap) room.customRolesMap = {};
+        if (room.moderator) delete room.customRolesMap[room.moderator];
+        io.to(roomId).emit('moderator-assigned', room.moderator);
+        io.to(roomId).emit('custom-roles-updated', room.customRolesMap);
+        emitRoomInfo(roomId);
       }
     });
 
     socket.on('update-custom-roles', (roleData) => {
       const room = rooms[roomId];
       if (room && room.state === 'lobby' && (room.admin === peerId || room.moderator === peerId)) {
+        if (!roleData || !room.players[roleData.targetId]) return;
+        if (room.players[roleData.targetId].role === 'spectator') return;
+        if (room.settings.modEnabled && room.moderator && roleData.targetId === room.moderator) return;
+        if (!isValidCustomRole(room, roleData.role)) return;
         if (!room.customRolesMap) room.customRolesMap = {};
         if (roleData.role === '') {
           delete room.customRolesMap[roleData.targetId];
@@ -444,13 +466,14 @@ io.on('connection', (socket) => {
           room.customRolesMap[roleData.targetId] = roleData.role;
         }
         io.to(roomId).emit('custom-roles-updated', room.customRolesMap);
+        emitRoomInfo(roomId);
       }
     });
 
     socket.on('start-game', (clientCustomRolesMap) => { // Moderatör role map gönderebilir
       const room = rooms[roomId];
       if (room && (room.admin === peerId || room.moderator === peerId) && room.state === 'lobby') {
-        const customRolesMap = Object.keys(clientCustomRolesMap || {}).length > 0 ? clientCustomRolesMap : (room.customRolesMap || {});
+        const rawCustomRolesMap = Object.keys(clientCustomRolesMap || {}).length > 0 ? clientCustomRolesMap : (room.customRolesMap || {});
         room.state = 'playing';
         room.phase = 'night'; // Start with Night
         room.round = 1;
@@ -467,11 +490,17 @@ io.on('connection', (socket) => {
         }
 
         // Define Players
-        let playableIds = playerIds;
+        let playableIds = playerIds.filter(id => room.players[id].role !== 'spectator');
         if (room.settings.modEnabled && room.moderator) {
           room.players[room.moderator].role = 'moderator';
-          playableIds = playerIds.filter(id => id !== room.moderator);
+          playableIds = playableIds.filter(id => id !== room.moderator);
         }
+
+        const customRolesMap = {};
+        playableIds.forEach(id => {
+          const role = rawCustomRolesMap[id];
+          if (isValidCustomRole(room, role)) customRolesMap[id] = role;
+        });
 
         if (customRolesMap && Object.keys(customRolesMap).length > 0) {
           // Mod defined roles
@@ -546,6 +575,7 @@ io.on('connection', (socket) => {
     socket.on('submit-vote', (targetPeerId) => {
       const room = rooms[roomId];
       if (room && room.state === 'playing' && !room.players[peerId].isDead) {
+        if (!room.players[targetPeerId]) return;
         if (room.phase === 'dawn' && room.players[peerId].role !== 'healer') return;
         if (room.phase === 'night' && room.players[peerId].role !== 'vampire') return;
         if (room.players[targetPeerId] && room.players[targetPeerId].isDead) return;
