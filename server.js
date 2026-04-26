@@ -29,6 +29,44 @@ function clearTimer(room) {
   }
 }
 
+function buildPublicPlayers(room) {
+  const publicPlayers = {};
+  Object.entries(room.players).forEach(([id, p]) => {
+    publicPlayers[id] = {
+      userName: p.userName,
+      score: Number(p.score) || 0,
+      isDead: !!p.isDead
+    };
+  });
+  return publicPlayers;
+}
+
+function buildRoomInfo(room) {
+  return {
+    admin: room.admin,
+    moderator: room.moderator,
+    state: room.state,
+    phase: room.phase,
+    settings: room.settings,
+    history: room.history,
+    roundsData: room.roundsData || [],
+    gamesHistory: room.gamesHistory || [],
+    playersBase: buildPublicPlayers(room),
+    customRolesMap: room.customRolesMap || {}
+  };
+}
+
+function emitRoomInfo(roomId, targetSocket = null) {
+  const room = rooms[roomId];
+  if (!room) return;
+  const payload = buildRoomInfo(room);
+  if (targetSocket) {
+    targetSocket.emit('room-info', payload);
+  } else {
+    io.to(roomId).emit('room-info', payload);
+  }
+}
+
 function checkGameOver(roomId) {
   const room = rooms[roomId];
   if (!room || room.state !== 'playing') return false;
@@ -88,6 +126,7 @@ function checkGameOver(roomId) {
 
     console.log(`[Room ${roomId}] GAME OVER - Winner: ${winner}`);
     io.to(roomId).emit('game-over', { winner, playersDetails: rolesMap });
+    emitRoomInfo(roomId);
     return true;
   }
   return false;
@@ -182,6 +221,7 @@ function processDayExecution(roomId) {
     room.players[targetToKill].isDead = true;
     room.history.push({ round: room.round, phase: 'day', event: `${room.players[targetToKill].userName} kasaba halkı tarafından idam edildi.`, flavor: '' });
     io.to(roomId).emit('player-killed', targetToKill, 'day', 'halk idamı');
+    emitRoomInfo(roomId);
   } else {
     room.currentRoundData.dayVictim = null;
     room.currentRoundData.isTie = isTie;
@@ -222,6 +262,7 @@ function processDawnResolution(roomId) {
       room.players[room.nightVictim].isDead = true;
       room.history.push({ round: room.round, phase: 'night', event: `${room.players[room.nightVictim].userName} vampirler tarafından parçalandı.`, flavor: room.nightFlavor || '' });
       io.to(roomId).emit('player-killed', room.nightVictim, 'night', room.nightFlavor || 'Kanı emildi');
+      emitRoomInfo(roomId);
     }
     io.to(roomId).emit('history-updated', room.history, room.roundsData);
   }
@@ -274,7 +315,6 @@ function startPhaseTimer(roomId) {
         isGameOver = processDawnResolution(roomId);
         room.phase = 'day';
       } else if (room.phase === 'day') {
-        room.round += 1;
         isGameOver = processDayExecution(roomId);
         room.phase = 'night';
       }
@@ -346,25 +386,10 @@ io.on('connection', (socket) => {
     const parsedScore = Number(localScore) || 0;
     rooms[roomId].players[peerId] = { userName, role: null, socketId: socket.id, isDead: false, score: parsedScore };
 
-    const publicPlayers = {};
-    Object.entries(rooms[roomId].players).forEach(([id, p]) => {
-      publicPlayers[id] = { userName: p.userName, score: p.score || 0, isDead: p.isDead };
-    });
-
-    socket.emit('room-info', {
-      admin: rooms[roomId].admin,
-      moderator: rooms[roomId].moderator,
-      state: rooms[roomId].state,
-      phase: rooms[roomId].phase,
-      settings: rooms[roomId].settings,
-      history: rooms[roomId].history,
-      roundsData: rooms[roomId].roundsData || [],
-      gamesHistory: rooms[roomId].gamesHistory || [],
-      playersBase: publicPlayers,
-      customRolesMap: rooms[roomId].customRolesMap || {}
-    });
+    emitRoomInfo(roomId, socket);
 
     socket.to(roomId).emit('user-connected', peerId, userName, null, localScore);
+    emitRoomInfo(roomId);
 
     socket.on('approve-spectator', (specData, isApproved) => {
       const room = rooms[roomId];
@@ -382,29 +407,14 @@ io.on('connection', (socket) => {
         const parsedScore = Number(specData.localScore) || 0;
         room.players[specData.peerId] = { userName: specData.userName, role: 'spectator', socketId: specData.socketId, isDead: true, score: parsedScore };
 
-        const publicPlayers = {};
-        Object.entries(room.players).forEach(([id, p]) => {
-          publicPlayers[id] = { userName: p.userName, score: p.score || 0, isDead: p.isDead };
-        });
-
-        targetSocket.emit('room-info', {
-          admin: room.admin,
-          moderator: room.moderator,
-          state: room.state,
-          phase: room.phase,
-          settings: room.settings,
-          history: room.history,
-          roundsData: room.roundsData || [],
-          gamesHistory: room.gamesHistory || [],
-          playersBase: publicPlayers,
-          customRolesMap: room.customRolesMap || {}
-        });
+        emitRoomInfo(roomId, targetSocket);
 
         // Force their UI to recognize playing state and spectator role
         targetSocket.emit('game-started', { phase: room.phase });
         targetSocket.emit('role-assigned', 'spectator');
 
-        io.to(roomId).emit('user-connected', specData.peerId, specData.userName, 'spectator', specData.localScore);
+        targetSocket.to(roomId).emit('user-connected', specData.peerId, specData.userName, 'spectator', specData.localScore);
+        emitRoomInfo(roomId);
       }
     });
 
@@ -491,6 +501,7 @@ io.on('connection', (socket) => {
         });
 
         io.to(roomId).emit('game-started', { phase: 'night' });
+        emitRoomInfo(roomId);
 
         setTimeout(() => {
           startPhaseTimer(roomId);
@@ -560,6 +571,7 @@ io.on('connection', (socket) => {
           }
         });
         io.to(roomId).emit('returned-to-lobby');
+        emitRoomInfo(roomId);
       }
     });
 
