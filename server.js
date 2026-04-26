@@ -78,6 +78,53 @@ function isValidCustomRole(room, role) {
   return role === 'healer' && !!room.settings.healerEnabled;
 }
 
+function getManualRoleLimits(room) {
+  return {
+    vampire: Math.max(1, Number(room.settings.vampireCount) || 1),
+    healer: room.settings.healerEnabled ? 1 : 0
+  };
+}
+
+function getManualRoleCounts(roleMap = {}) {
+  return Object.values(roleMap).reduce((counts, role) => {
+    if (role === 'vampire') counts.vampire += 1;
+    if (role === 'healer') counts.healer += 1;
+    return counts;
+  }, { vampire: 0, healer: 0 });
+}
+
+function normalizeCustomRoles(room, rawMap = {}) {
+  const result = {};
+  const limits = getManualRoleLimits(room);
+  const counts = { vampire: 0, healer: 0 };
+
+  Object.entries(rawMap || {}).forEach(([targetId, role]) => {
+    const player = room.players[targetId];
+    if (!player || player.role === 'spectator') return;
+    if (room.settings.modEnabled && room.moderator && targetId === room.moderator) return;
+    if (!isValidCustomRole(room, role) || role === '' || role === 'villager') return;
+    if (role === 'vampire' && counts.vampire >= limits.vampire) return;
+    if (role === 'healer' && counts.healer >= limits.healer) return;
+    result[targetId] = role;
+    if (role === 'vampire') counts.vampire += 1;
+    if (role === 'healer') counts.healer += 1;
+  });
+
+  return result;
+}
+
+function validateManualRoleSelection(room, roleMap = {}) {
+  const limits = getManualRoleLimits(room);
+  const counts = getManualRoleCounts(roleMap);
+  if (counts.vampire !== limits.vampire) {
+    return `Oyunu başlatmadan önce ${limits.vampire} vampir seçmeniz gerekiyor.`;
+  }
+  if (limits.healer > 0 && counts.healer !== 1) {
+    return 'Oyunu başlatmadan önce 1 şifacı seçmeniz gerekiyor.';
+  }
+  return null;
+}
+
 function isModeratorUnavailable(room) {
   return !!(room && room.moderatorGrace && room.moderatorGrace.expiresAt > Date.now());
 }
@@ -533,6 +580,10 @@ io.on('connection', (socket) => {
           });
           io.to(roomId).emit('custom-roles-updated', room.customRolesMap);
         }
+        if (room.customRolesMap) {
+          room.customRolesMap = normalizeCustomRoles(room, room.customRolesMap);
+          io.to(roomId).emit('custom-roles-updated', room.customRolesMap);
+        }
         io.to(roomId).emit('moderator-assigned', room.moderator);
         io.to(roomId).emit('settings-updated', room.settings);
         emitRoomInfo(roomId);
@@ -569,6 +620,16 @@ io.on('connection', (socket) => {
         if (room.settings.modEnabled && room.moderator && roleData.targetId === room.moderator) return;
         if (!isValidCustomRole(room, roleData.role)) return;
         if (!room.customRolesMap) room.customRolesMap = {};
+        if (roleData.role === 'vampire' || roleData.role === 'healer') {
+          const nextRoles = { ...room.customRolesMap, [roleData.targetId]: roleData.role };
+          const normalized = normalizeCustomRoles(room, nextRoles);
+          if (normalized[roleData.targetId] !== roleData.role) {
+            socket.emit('role-selection-error', roleData.role === 'vampire'
+              ? `En fazla ${getManualRoleLimits(room).vampire} vampir seçilebilir.`
+              : 'En fazla 1 şifacı seçilebilir.');
+            return;
+          }
+        }
         if (roleData.role === '') {
           delete room.customRolesMap[roleData.targetId];
         } else {
@@ -586,6 +647,17 @@ io.on('connection', (socket) => {
         const rawCustomRolesMap = canUseCustomRoles
           ? (Object.keys(clientCustomRolesMap || {}).length > 0 ? clientCustomRolesMap : (room.customRolesMap || {}))
           : {};
+        const normalizedRawRoles = normalizeCustomRoles(room, rawCustomRolesMap);
+        if (canUseCustomRoles) {
+          const manualRoleError = validateManualRoleSelection(room, normalizedRawRoles);
+          if (manualRoleError) {
+            socket.emit('start-game-rejected', manualRoleError);
+            room.customRolesMap = normalizedRawRoles;
+            io.to(roomId).emit('custom-roles-updated', room.customRolesMap);
+            emitRoomInfo(roomId);
+            return;
+          }
+        }
         room.state = 'playing';
         room.phase = 'night'; // Start with Night
         room.round = 1;
@@ -605,7 +677,7 @@ io.on('connection', (socket) => {
 
         const customRolesMap = {};
         playableIds.forEach(id => {
-          const role = rawCustomRolesMap[id];
+          const role = normalizedRawRoles[id];
           if (isValidCustomRole(room, role)) customRolesMap[id] = role;
         });
 
