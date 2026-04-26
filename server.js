@@ -226,7 +226,7 @@ function processDayExecution(roomId) {
     room.currentRoundData.isTie = false;
     room.players[targetToKill].isDead = true;
     room.history.push({ round: room.round, phase: 'day', event: `${room.players[targetToKill].userName} kasaba halkı tarafından idam edildi.`, flavor: '' });
-    io.to(roomId).emit('player-killed', targetToKill, 'day', 'halk idamı');
+    io.to(roomId).emit('player-killed', targetToKill, 'day', 'halk idamı', room.players[targetToKill].role);
     emitRoomInfo(roomId);
   } else {
     room.currentRoundData.dayVictim = null;
@@ -260,14 +260,14 @@ function processDawnResolution(roomId) {
     if (healedTarget === room.nightVictim) {
       room.currentRoundData.nightVictim = room.players[room.nightVictim].userName;
       room.currentRoundData.healed = true;
-      io.to(roomId).emit('player-saved', room.nightVictim);
+      io.to(roomId).emit('player-saved', room.nightVictim, room.players[room.nightVictim].role);
       room.history.push({ round: room.round, phase: 'night', event: `Vampirler saldırdı ama Şifacı kurbanı son anda kurtardı!`, flavor: room.nightFlavor || '' });
     } else {
       room.currentRoundData.nightVictim = room.players[room.nightVictim].userName;
       room.currentRoundData.healed = false;
       room.players[room.nightVictim].isDead = true;
       room.history.push({ round: room.round, phase: 'night', event: `${room.players[room.nightVictim].userName} vampirler tarafından parçalandı.`, flavor: room.nightFlavor || '' });
-      io.to(roomId).emit('player-killed', room.nightVictim, 'night', room.nightFlavor || 'Kanı emildi');
+      io.to(roomId).emit('player-killed', room.nightVictim, 'night', room.nightFlavor || 'Kanı emildi', room.players[room.nightVictim].role);
       emitRoomInfo(roomId);
     }
     io.to(roomId).emit('history-updated', room.history, room.roundsData);
