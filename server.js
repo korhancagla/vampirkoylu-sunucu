@@ -19,7 +19,7 @@ const rooms = {};
 const TICK_MS = Number(process.env.TICK_MS) || 1000;                     // 1 "saniye"
 const LOBBY_GRACE_MS = Number(process.env.LOBBY_GRACE_MS) || 60 * 1000;  // Lobide sayfa yenileme / telefon kilidi için bekleme
 const GAME_GRACE_MS = Number(process.env.GAME_GRACE_MS) || 5 * 60 * 1000; // Oyunda yeniden bağlanma süresi (telefon kilitlenince kopar); sonra "terk etti"
-const AVATAR_COUNT = 25;
+const AVATAR_COUNT = 27;
 const IN_PERSON_MAX_DELAY = 20;     // Yan yana modunda eylemden sonra en fazla bu kadar saniye rastgele beklenir
 const MIN_PLAYERS = 4;
 const AUTO_ADVANCE_SECONDS = 1;     // Herkes eylemini yapınca kalan süre
@@ -379,7 +379,7 @@ function chatDeniedReason(room, pid, channel) {
     return 'Gece köy uyuyor; genel sohbet sabah açılacak.';
   }
   if (channel === 'vampire') return p.role === 'vampire' ? 'Öldüğün için vampir kanalına artık yazamazsın.' : 'Bu kanal sadece vampirlere açık.';
-  return 'Ölüler kanalı sadece ölüler ve izleyicilere açık.';
+  return 'Ölüler kanalı yalnızca ölülere ve izleyicilere açık.';
 }
 
 function pushChat(room, channel, message) {
@@ -391,8 +391,15 @@ function pushChat(room, channel, message) {
   });
 }
 
+// Cümle oyuncu adıyla başlasa bile ilk harf büyük yazılır ("gizli sekme öldü" → "Gizli sekme öldü")
+const capFirst = (text) => (typeof text === 'string' && text ? text.charAt(0).toLocaleUpperCase('tr') + text.slice(1) : text);
+
+function pushHistory(room, entry) {
+  room.history.push({ ...entry, event: capFirst(entry.event) });
+}
+
 function systemChat(room, channel, text) {
-  pushChat(room, channel, { id: crypto.randomUUID(), channel, from: null, fromName: 'Sistem', text, ts: Date.now() });
+  pushChat(room, channel, { id: crypto.randomUUID(), channel, from: null, fromName: 'Sistem', text: capFirst(text), ts: Date.now() });
 }
 
 function sendChatHistory(room, pid) {
@@ -513,6 +520,8 @@ function autoAdvance(room) {
     shortenTimer(room);
     return;
   }
+  // Yan yana modunda gece, vampir seçim yapsa da süre dolana kadar sürer (diğer aşamalar gibi)
+  if (room.phase === 'night') return;
   if (room.autoTimer) return;
   const delay = Math.floor(Math.random() * (IN_PERSON_MAX_DELAY + 1));
   if (delay >= room.timeLeft) return; // süre zaten daha önce dolacak
@@ -604,7 +613,7 @@ function killPlayer(room, pid, cause, flavor = '', method = null) {
     hunter: `${p.userName} avcının son kurşunuyla vuruldu.`,
     left: `${p.userName} oyunu terk etti.`,
   };
-  room.history.push({ round: room.round, phase: cause, event: events[cause] || `${p.userName} öldü.`, flavor });
+  pushHistory(room, { round: room.round, phase: cause, event: events[cause] || `${p.userName} öldü.`, flavor });
   io.to(room.id).emit('player-killed', pid, cause, flavor, reveal ? p.role : null, p.will || '', method);
   if (p.role === 'hunter' && cause !== 'left') room.pendingHunter = pid;
   emitPrivateState(room, pid);
@@ -697,13 +706,13 @@ function resolveDawn(room) {
       victim.elderShieldUsed = true;
       rd.elderSurvived = true;
       rd.nightVictim = null;
-      room.history.push({ round: room.round, phase: 'night', event: 'Vampirler saldırdı ama kurban saldırıdan sağ çıktı!', flavor: '' });
+      pushHistory(room, { round: room.round, phase: 'night', event: 'Vampirler saldırdı ama kurban saldırıdan sağ çıktı!', flavor: '' });
       io.to(room.id).emit('player-saved');
       emitTo(room, target, 'elder-survived');
     } else if (heal === target) {
       rd.healed = true;
       rd.savedName = room.players[target].userName;
-      room.history.push({ round: room.round, phase: 'night', event: 'Vampirler saldırdı ama Şifacı kurbanı son anda kurtardı!', flavor: '' });
+      pushHistory(room, { round: room.round, phase: 'night', event: 'Vampirler saldırdı ama Şifacı kurbanı son anda kurtardı!', flavor: '' });
       io.to(room.id).emit('player-saved');
       rd.nightVictim = null;
     } else {
@@ -782,8 +791,10 @@ function resolveVerdict(room) {
   const innocent = values.length - guilty;
   room.currentRoundData.trial = { accused: nameOf(room, accused), guilty, innocent, executed: guilty > innocent };
   room.trial = null;
+  // Karar sonucu herkese sayılarıyla duyurulur (kaç kişi asılsın / bırakılsın dedi)
+  io.to(room.id).emit('verdict-result', { accusedId: accused, name: nameOf(room, accused), guilty, innocent, executed: !!accused && guilty > innocent });
   if (accused && guilty > innocent && isAlive(room.players[accused])) return executePlayer(room, accused);
-  room.history.push({ round: room.round, phase: 'day', event: `${nameOf(room, accused)} savunmasını yaptı ve halk onu bıraktı (${guilty} asılsın / ${innocent} bırakılsın).`, flavor: '' });
+  pushHistory(room, { round: room.round, phase: 'day', event: `${nameOf(room, accused)} savunmasını yaptı ve halk onu bıraktı (${guilty} asılsın / ${innocent} bırakılsın).`, flavor: '' });
   endRound(room);
   return afterDeaths(room, 'night');
 }
@@ -1117,7 +1128,7 @@ function handleVote(room, pid, me, targetId) {
     if (me.role !== 'healer' || !isAlive(me)) return 'Şafakta sadece Şifacı birini koruyabilir.';
     if (!isAlive(target)) return 'Sadece hayattaki birini koruyabilirsin.';
     if (targetId === me.lastHealTarget) return 'Bu kişiyi dün gece korudun; aynı kişiyi üst üste iki gece koruyamazsın.';
-    if (targetId === pid && me.selfHealUsed) return 'Kendini koruma hakkını kullandın; bu oyunda bir kez korunabiliyordun.';
+    if (targetId === pid && me.selfHealUsed) return 'Kendini bir oyunda yalnızca bir kez koruyabilirsin ve bu hakkını kullandın.';
     room.actions.heal = targetId;
     broadcastVotes(room);
     autoAdvance(room);
@@ -1195,7 +1206,8 @@ io.on('connection', (socket) => {
     // 2) Yeni giriş
     if (room) {
       if (room.players[peerId]) return reject('Bağlantı kurulurken bir çakışma oldu. Sayfayı yenileyip tekrar dene.');
-      const sameNamed = Object.values(room.players).find((p) => sameName(p.userName, userName));
+      // Oyunu terk etmiş / odadan çıkarılmış oyuncunun adı yeniden kullanılabilir
+      const sameNamed = Object.values(room.players).find((p) => !p.left && sameName(p.userName, userName));
       if (sameNamed && !sameNamed.connected && !sameNamed.left) {
         return reject(`"${userName}" adıyla oynayan oyuncunun bağlantısı kopmuş ve yeri ona ayrılmış durumda. O oyuncu sensen, oyuna ilk girdiğin telefon/tarayıcıdan aynı oda kodu ve isimle tekrar gir; kaldığın yerden devam edersin.`);
       }
@@ -1386,7 +1398,7 @@ io.on('connection', (socket) => {
     emitPrivateStates(room);
     emitChatAccess(room);
     const vampires = vampireIds(room);
-    if (vampires.length > 1) systemChat(room, 'vampire', `Vampir takımı: ${vampires.map((id) => nameOf(room, id)).join(', ')}. Gece hedefte anlaşın.`);
+    if (vampires.length > 1) systemChat(room, 'vampire', `Vampir takımı: ${vampires.map((id) => nameOf(room, id)).join(', ')}. Geceleri aynı hedefte anlaşın.`);
     room.gapTimer = setTimeout(() => startPhase(room, 'night'), GAME_START_DELAY_MS);
   });
 
@@ -1555,6 +1567,29 @@ io.on('connection', (socket) => {
     emitRoomInfo(room);
     emitPrivateStates(room);
     emitChatAccess(room);
+  });
+
+  // Yönetici istenmeyen bir oyuncuyu odadan çıkarır (oyuncu isterse yeniden girebilir)
+  socket.on('kick-player', (targetId) => {
+    const c = ctx();
+    if (!c || !canControl(c.room, c.pid) || typeof targetId !== 'string' || targetId === c.pid) return;
+    const { room } = c;
+    const target = room.players[targetId];
+    if (!target || target.left) return;
+    const targetSocket = target.socketId && io.sockets.sockets.get(target.socketId);
+    if (targetSocket) {
+      targetSocket.emit('kicked', 'Oda yöneticisi seni odadan çıkardı. İstersen aynı oda koduyla yeniden girebilirsin.');
+      targetSocket.leave(room.id);
+      targetSocket.data.roomId = null;
+      targetSocket.data.pid = null;
+    }
+    if (target.disconnectTimer) clearTimeout(target.disconnectTimer);
+    target.disconnectTimer = null;
+    target.connected = false;
+    target.socketId = null;
+    target.token = null; // eski oturum anahtarıyla geri dönemesin; yeni oyuncu olarak girer
+    systemChat(room, 'all', `${target.userName} oda yöneticisi tarafından odadan çıkarıldı.`);
+    handleAbandon(room.id, targetId);
   });
 
   // Oyuncu "Çık" butonuna bastı: bekleme süresi olmadan koltuğu bırakır
