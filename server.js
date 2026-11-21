@@ -17,8 +17,10 @@ const io = new Server(server, { cors: { origin: '*', methods: ['GET', 'POST'] } 
 const rooms = {};
 // Testlerde süreleri kısaltmak için ortam değişkenleri (normalde kullanılmaz)
 const TICK_MS = Number(process.env.TICK_MS) || 1000;                     // 1 "saniye"
-const LOBBY_GRACE_MS = Number(process.env.LOBBY_GRACE_MS) || 15 * 1000;  // Lobide sayfa yenileme için bekleme
-const GAME_GRACE_MS = Number(process.env.GAME_GRACE_MS) || 90 * 1000;    // Oyunda yeniden bağlanma süresi; sonra "terk etti"
+const LOBBY_GRACE_MS = Number(process.env.LOBBY_GRACE_MS) || 60 * 1000;  // Lobide sayfa yenileme / telefon kilidi için bekleme
+const GAME_GRACE_MS = Number(process.env.GAME_GRACE_MS) || 5 * 60 * 1000; // Oyunda yeniden bağlanma süresi (telefon kilitlenince kopar); sonra "terk etti"
+const AVATAR_COUNT = 25;
+const IN_PERSON_MAX_DELAY = 20;     // Yan yana modunda eylemden sonra en fazla bu kadar saniye rastgele beklenir
 const MIN_PLAYERS = 4;
 const AUTO_ADVANCE_SECONDS = 1;     // Herkes eylemini yapınca kalan süre
 const PHASE_GAP_MS = 2 * TICK_MS;
@@ -30,12 +32,13 @@ const WILL_MAX_LEN = 300;
 const NAME_MAX_LEN = 20;
 const ROOM_MAX_LEN = 40;
 
-const TOWN_ROLES = ['villager', 'healer', 'seer', 'hunter'];
+const TOWN_ROLES = ['villager', 'healer', 'seer', 'hunter', 'elder'];
 const SPECIAL_ROLES = [
   ['healer', 'healerEnabled'],
   ['seer', 'seerEnabled'],
   ['hunter', 'hunterEnabled'],
   ['jester', 'jesterEnabled'],
+  ['elder', 'elderEnabled'],
 ];
 
 const DEFAULT_SETTINGS = {
@@ -51,8 +54,12 @@ const DEFAULT_SETTINGS = {
   seerEnabled: false,
   hunterEnabled: false,
   jesterEnabled: false,
+  elderEnabled: false,
+  peacefulFirstNight: false,
   trialEnabled: true,
   revealRoles: true,
+  silentNight: true,
+  inPersonMode: false,
   winScore: 5,
 };
 
@@ -64,7 +71,7 @@ const DURATION_LIMITS = {
   verdictDuration: [5, 120],
   hunterDuration: [5, 60],
 };
-const BOOL_SETTINGS = ['healerEnabled', 'seerEnabled', 'hunterEnabled', 'jesterEnabled', 'trialEnabled', 'revealRoles'];
+const BOOL_SETTINGS = ['healerEnabled', 'seerEnabled', 'hunterEnabled', 'jesterEnabled', 'trialEnabled', 'revealRoles', 'silentNight', 'inPersonMode', 'elderEnabled', 'peacefulFirstNight'];
 
 // ---------------------------------------------------------------------------
 // Yardımcılar
@@ -179,6 +186,9 @@ function publicPlayers(room) {
       isModerator: id === room.moderator,
       role: revealed ? p.role : null,
       will: p.isDead && room.state !== 'lobby' ? (p.will || '') : '',
+      avatar: p.avatar || 1,
+      camOn: !!p.camOn,
+      micOn: !!p.micOn,
       deathCause: p.isDead && room.state !== 'lobby' && p.role !== 'spectator' ? (p.deathCause || null) : null,
       deathRound: p.isDead && room.state !== 'lobby' ? (p.deathRound || null) : null,
       stats: room.statsBook[p.userName] || { games: 0, wins: 0, lastGain: 0 },
@@ -217,8 +227,9 @@ function buildRoomInfo(room, forPid) {
     state: room.state,
     phase: room.phase,
     phaseOpen: !!room.phaseOpen,
+    paused: !!room.paused,
     round: room.round,
-    timeLeft: room.timerInterval || room.phaseOpen ? room.timeLeft : null,
+    timeLeft: room.timerInterval || room.phaseOpen || room.paused ? room.timeLeft : null,
     settings: room.settings,
     history: room.history,
     roundsData: roomRounds(room),
@@ -250,6 +261,8 @@ function privateState(room, pid) {
     seerResults: p.seerResults || [],
     lastHealTarget: p.lastHealTarget || null,
     selfHealUsed: !!p.selfHealUsed,
+    killedBy: p.killedBy || null,
+    elderShieldUsed: !!p.elderShieldUsed,
     allRoles: null,
   };
   if (room.state === 'playing' && (p.role === 'vampire' || pid === room.moderator)) state.teammates = vampireIds(room);
@@ -307,7 +320,8 @@ function chatAccess(room, pid) {
   const ghost = p.isDead || p.role === 'spectator' || p.left;
   const read = ['all'];
   const write = [];
-  if (isMod || (!ghost && !['night', 'dawn'].includes(room.phase))) write.push('all');
+  const quietPhase = room.settings.silentNight && ['night', 'dawn'].includes(room.phase);
+  if (isMod || (!ghost && !quietPhase)) write.push('all');
   if (p.role === 'vampire' || isMod) {
     read.push('vampire');
     if (p.role === 'vampire' && !p.isDead) write.push('vampire');
@@ -359,8 +373,22 @@ function emitChatAccess(room) {
 function clearTimers(room) {
   if (room.timerInterval) clearInterval(room.timerInterval);
   if (room.gapTimer) clearTimeout(room.gapTimer);
+  if (room.autoTimer) clearTimeout(room.autoTimer);
   room.timerInterval = null;
   room.gapTimer = null;
+  room.autoTimer = null;
+}
+
+function runTicker(room) {
+  if (room.timerInterval) clearInterval(room.timerInterval);
+  room.timerInterval = setInterval(() => {
+    room.timeLeft -= 1;
+    io.to(room.id).emit('timer-tick', Math.max(0, room.timeLeft));
+    if (room.timeLeft <= 0) {
+      clearTimers(room);
+      endPhase(room);
+    }
+  }, TICK_MS);
 }
 
 function durationFor(room, phase) {
@@ -382,6 +410,7 @@ function startPhase(room, phase) {
   clearTimers(room);
   room.phase = phase;
   room.phaseOpen = true;
+  room.paused = false;
   room.actions = freshActions();
   room.timeLeft = durationFor(room, phase);
   io.to(room.id).emit('votes-cleared');
@@ -393,14 +422,7 @@ function startPhase(room, phase) {
   });
   emitRoomInfo(room);
   emitChatAccess(room);
-  room.timerInterval = setInterval(() => {
-    room.timeLeft -= 1;
-    io.to(room.id).emit('timer-tick', Math.max(0, room.timeLeft));
-    if (room.timeLeft <= 0) {
-      clearTimers(room);
-      endPhase(room);
-    }
-  }, TICK_MS);
+  runTicker(room);
 }
 
 function goTo(room, phase) {
@@ -412,7 +434,7 @@ function goTo(room, phase) {
 
 // Herkes eylemini yaptıysa aşamayı tam "seconds" saniye sonra bitirir ve sonraki aşamaya kısa arayla geçer
 function shortenTimer(room, seconds = AUTO_ADVANCE_SECONDS) {
-  if (!room.timerInterval || room.timeLeft <= seconds) return;
+  if (room.paused || !room.timerInterval || room.timeLeft <= seconds) return;
   clearInterval(room.timerInterval);
   room.timerInterval = null;
   room.timeLeft = seconds;
@@ -424,6 +446,62 @@ function shortenTimer(room, seconds = AUTO_ADVANCE_SECONDS) {
     io.to(room.id).emit('timer-tick', 0);
     endPhase(room);
   }, seconds * TICK_MS);
+}
+
+// Herkes eylemini yapınca çağrılır. Yan yana modunda süre ekranda değişmez; aşama 0-20 sn arası
+// rastgele bir anda biter ki masadakiler kimin telefonla eylem yaptığını çıkaramasın.
+function autoAdvance(room) {
+  if (room.paused || !room.timerInterval) return;
+  if (!room.settings.inPersonMode) {
+    shortenTimer(room);
+    return;
+  }
+  if (room.autoTimer) return;
+  const delay = Math.floor(Math.random() * (IN_PERSON_MAX_DELAY + 1));
+  if (delay >= room.timeLeft) return; // süre zaten daha önce dolacak
+  room.autoTimer = setTimeout(() => {
+    room.autoTimer = null;
+    if (room.paused || !room.phaseOpen) return;
+    clearTimers(room);
+    endPhase(room);
+  }, delay * TICK_MS);
+}
+
+// İlk gece barışı: oyunu uzatmak için 1. gece kimse öldürülemez
+const isPeacefulNight = (room) => !!room.settings.peacefulFirstNight && room.round === 1;
+
+// Bu aşamada herkes yapması gerekeni yaptı mı?
+function readyToAdvance(room) {
+  const a = room.actions;
+  switch (room.phase) {
+    case 'night': {
+      const vampires = isPeacefulNight(room) ? [] : aliveVampireIds(room);
+      const allVoted = vampires.every((id) => a.votes[id]);
+      const agreed = vampires.length === 0 || new Set(vampires.map((id) => a.votes[id])).size === 1;
+      const seerReady = !findAliveRole(room, 'seer') || !!a.seer;
+      return allVoted && agreed && seerReady;
+    }
+    case 'dawn': return !!a.heal;
+    case 'verdict': return aliveIds(room).filter((id) => id !== room.trial?.accused).every((id) => id in a.verdict);
+    case 'hunter': return !!a.hunterShot;
+    default: return false;
+  }
+}
+
+function setPaused(room, paused) {
+  if (room.state !== 'playing' || !room.phaseOpen || room.paused === paused) return;
+  room.paused = paused;
+  if (paused) {
+    if (room.timerInterval) clearInterval(room.timerInterval);
+    room.timerInterval = null;
+    if (room.autoTimer) clearTimeout(room.autoTimer);
+    room.autoTimer = null;
+  } else {
+    runTicker(room);
+  }
+  io.to(room.id).emit('pause-changed', paused, room.timeLeft);
+  if (!paused && readyToAdvance(room)) autoAdvance(room);
+  emitRoomInfo(room);
 }
 
 function endPhase(room) {
@@ -478,7 +556,8 @@ function checkWinner(room) {
   const vampires = alive.filter((id) => room.players[id].role === 'vampire').length;
   const others = alive.length - vampires;
   if (vampires === 0) return 'villagers';
-  if (vampires >= others) return 'vampires';
+  // Vampirler sayıca üstün olunca ya da 1'e 1 kalınca kazanır; eşitlikte (2-2 gibi) oyun sürer
+  if (vampires > others || (vampires === 1 && others === 1)) return 'vampires';
   return null;
 }
 
@@ -510,11 +589,18 @@ function pluralityTarget(votes) {
 }
 
 function resolveNight(room) {
+  if (isPeacefulNight(room)) room.actions.votes = {};
   const { top } = pluralityTarget(room.actions.votes);
   const valid = top.filter((id) => isAlive(room.players[id]) && room.players[id].role !== 'vampire');
-  room.pendingKill = valid.length ? pickRandom(valid) : null;
-  if (top.length > 1 && room.pendingKill) {
-    systemChat(room, 'vampire', `Oylar eşitti; hedef kura ile ${nameOf(room, room.pendingKill)} oldu.`);
+  // Vampirler farklı kişilerde berabere kalırsa kimse ölmez: takım anlaşmak zorunda
+  room.pendingKill = valid.length === 1 ? valid[0] : null;
+  room.pendingKillers = room.pendingKill
+    ? Object.entries(room.actions.votes).filter(([, t]) => t === room.pendingKill).map(([v]) => nameOf(room, v))
+    : [];
+  if (valid.length > 1) {
+    systemChat(room, 'vampire', `Oylar eşit kaldı (${valid.map((id) => nameOf(room, id)).join(', ')}); bu gece kimse ölmedi. Bir dahaki gece aynı kişiyi seçin.`);
+  } else if (!room.pendingKill && isPeacefulNight(room)) {
+    systemChat(room, 'vampire', 'İlk gece barışı: bu gece kimse öldürülemez. Takımınızı tanıyın, yarın gece avlanırsınız.');
   } else if (!room.pendingKill) {
     systemChat(room, 'vampire', 'Bu gece kimse hedef seçilmedi; gece kansız geçti.');
   } else {
@@ -546,7 +632,15 @@ function resolveDawn(room) {
   if (target && room.players[target]) {
     rd.nightVictim = room.players[target].userName;
     rd.nightKillFlavor = room.nightFlavor || '';
-    if (heal === target) {
+    const victim = room.players[target];
+    if (heal !== target && victim.role === 'elder' && !victim.elderShieldUsed) {
+      victim.elderShieldUsed = true;
+      rd.elderSurvived = true;
+      rd.nightVictim = null;
+      room.history.push({ round: room.round, phase: 'night', event: 'Vampirler saldırdı ama kurban saldırıdan sağ çıktı!', flavor: '' });
+      io.to(room.id).emit('player-saved');
+      emitTo(room, target, 'elder-survived');
+    } else if (heal === target) {
       rd.healed = true;
       rd.savedName = room.players[target].userName;
       room.history.push({ round: room.round, phase: 'night', event: 'Vampirler saldırdı ama Şifacı kurbanı son anda kurtardı!', flavor: '' });
@@ -554,6 +648,8 @@ function resolveDawn(room) {
       rd.nightVictim = null;
     } else {
       rd.nightVictimRole = room.players[target].role;
+      room.players[target].killedBy = room.pendingKillers || [];
+      emitTo(room, target, 'killed-by', room.players[target].killedBy);
       killPlayer(room, target, 'night', room.nightFlavor || 'Kanı emildi');
     }
   }
@@ -761,7 +857,7 @@ function validateStart(room) {
 }
 
 function roleLabel(role) {
-  return { vampire: 'Vampir', healer: 'Şifacı', seer: 'Kahin', hunter: 'Avcı', jester: 'Deli', villager: 'Köylü' }[role] || role;
+  return { vampire: 'Vampir', healer: 'Şifacı', seer: 'Kahin', hunter: 'Avcı', jester: 'Deli', elder: 'Yaşlı Köylü', villager: 'Köylü' }[role] || role;
 }
 
 function assignRoles(room, ids, vCount, specials) {
@@ -844,7 +940,7 @@ function handleAbandon(roomId, pid) {
       delete room.actions.verdict[pid];
       if (room.currentRoundData) room.currentRoundData.left.push(p.userName);
       killPlayer(room, pid, 'left', 'Oyunu terk etti');
-      if (room.hunter && room.hunter.pid === pid) shortenTimer(room, 1);
+      if (room.hunter && room.hunter.pid === pid && !room.paused) shortenTimer(room, 1);
       const winner = checkWinner(room);
       if (winner) finishGame(room, winner);
     }
@@ -920,6 +1016,7 @@ function handleVote(room, pid, me, targetId) {
   if (phase === 'night') {
     if (!isAlive(me)) return 'Öldüğün için gece eylemi yapamazsın.';
     if (me.role === 'vampire') {
+      if (isPeacefulNight(room)) return 'İlk gece barışı: bu gece kimse öldürülemez. Takımını tanı, yarın gece avlanırsın.';
       if (!isAlive(target)) return 'Bu oyuncu zaten ölü.';
       if (target.role === 'vampire') return 'O da bir vampir; takım arkadaşına saldıramazsın.';
       room.actions.votes[pid] = targetId;
@@ -931,11 +1028,7 @@ function handleVote(room, pid, me, targetId) {
     } else {
       return 'Gece senin rolünün bir eylemi yok; sabahı bekle.';
     }
-    const vampires = aliveVampireIds(room);
-    const allVoted = vampires.every((id) => room.actions.votes[id]);
-    const agreed = new Set(vampires.map((id) => room.actions.votes[id])).size === 1;
-    const seerReady = !findAliveRole(room, 'seer') || !!room.actions.seer;
-    if (allVoted && agreed && seerReady) shortenTimer(room);
+    if (readyToAdvance(room)) autoAdvance(room);
     return null;
   }
 
@@ -946,7 +1039,7 @@ function handleVote(room, pid, me, targetId) {
     if (targetId === pid && me.selfHealUsed) return 'Kendini koruma hakkını kullandın; bu oyunda bir kez korunabiliyordun.';
     room.actions.heal = targetId;
     broadcastVotes(room);
-    shortenTimer(room);
+    autoAdvance(room);
     return null;
   }
 
@@ -954,7 +1047,7 @@ function handleVote(room, pid, me, targetId) {
     if (!room.hunter || room.hunter.pid !== pid) return 'Şu an sadece Avcı ateş edebilir.';
     if (!isAlive(target) || targetId === pid) return 'Sadece hayattaki başka bir oyuncuyu vurabilirsin.';
     room.actions.hunterShot = targetId;
-    shortenTimer(room, 1);
+    autoAdvance(room);
     return null;
   }
 
@@ -975,7 +1068,8 @@ io.on('connection', (socket) => {
   };
   const reject = (msg) => socket.emit('join-rejected', msg);
 
-  socket.on('join-room', (rawRoomId, rawPeerId, rawName, _ignoredScore, rawToken) => {
+  socket.on('join-room', (rawRoomId, rawPeerId, rawName, _ignoredScore, rawToken, rawAvatar) => {
+    const avatar = clampInt(rawAvatar, 1, AVATAR_COUNT, 1 + Math.floor(Math.random() * AVATAR_COUNT));
     if (socket.data.roomId || socket.data.pendingRoom) return;
     const roomId = cleanText(rawRoomId, ROOM_MAX_LEN).toLocaleLowerCase('tr');
     const peerId = typeof rawPeerId === 'string' ? rawPeerId.slice(0, 64) : '';
@@ -1020,14 +1114,17 @@ io.on('connection', (socket) => {
     // 2) Yeni giriş
     if (room) {
       if (room.players[peerId]) return reject('Bağlantı kurulurken bir çakışma oldu. Sayfayı yenileyip tekrar dene.');
-      const nameTaken = Object.values(room.players).some((p) => sameName(p.userName, userName))
-        || Object.values(room.pending).some((p) => sameName(p.userName, userName));
+      const sameNamed = Object.values(room.players).find((p) => sameName(p.userName, userName));
+      if (sameNamed && !sameNamed.connected && !sameNamed.left) {
+        return reject(`"${userName}" adıyla oynayan oyuncunun bağlantısı kopmuş ve yeri ona ayrılmış durumda. O oyuncu sensen, oyuna ilk girdiğin telefon/tarayıcıdan aynı oda kodu ve isimle tekrar gir; kaldığın yerden devam edersin.`);
+      }
+      const nameTaken = !!sameNamed || Object.values(room.pending).some((p) => sameName(p.userName, userName));
       if (nameTaken) return reject(`"${userName}" adı bu odada zaten kullanılıyor. Başka bir isim seç.`);
 
       if (room.state === 'playing') {
         const controller = controllerId(room);
         if (!controller || !room.players[controller]?.connected) return reject('Bu odada oyun sürüyor ve oda yöneticisi şu an bağlı değil, bu yüzden giriş onaylanamıyor. Oyun bitince tekrar dene.');
-        room.pending[socket.id] = { peerId, userName };
+        room.pending[socket.id] = { peerId, userName, avatar };
         socket.data.pendingRoom = room.id;
         emitTo(room, controller, 'spectator-request', { socketId: socket.id, userName });
         socket.emit('spectator-pending', 'Bu odada şu an oyun sürüyor. Oda yöneticisi onaylarsa bu oyunu izleyici olarak takip edecek, sonraki oyunda oynayacaksın.');
@@ -1047,6 +1144,9 @@ io.on('connection', (socket) => {
       left: false,
       token: crypto.randomUUID(),
       will: '',
+      avatar,
+      camOn: false,
+      micOn: false,
       disconnectTimer: null,
       chatTimes: [],
     };
@@ -1086,6 +1186,9 @@ io.on('connection', (socket) => {
       left: false,
       token: crypto.randomUUID(),
       will: '',
+      avatar: req.avatar || 1,
+      camOn: false,
+      micOn: false,
       disconnectTimer: null,
       chatTimes: [],
     });
@@ -1188,6 +1291,8 @@ io.on('connection', (socket) => {
       p.selfHealUsed = false;
       p.deathCause = null;
       p.deathRound = null;
+      p.killedBy = null;
+      p.elderShieldUsed = false;
       if (id === room.moderator) p.role = 'moderator';
       else if (p.role === 'spectator') p.role = null;
     });
@@ -1203,6 +1308,30 @@ io.on('connection', (socket) => {
     room.gapTimer = setTimeout(() => startPhase(room, 'night'), GAME_START_DELAY_MS);
   });
 
+  socket.on('set-avatar', (value) => {
+    const c = ctx();
+    if (!c) return;
+    c.me.avatar = clampInt(value, 1, AVATAR_COUNT, c.me.avatar || 1);
+    emitRoomInfo(c.room);
+  });
+
+  socket.on('media-state', (state) => {
+    const c = ctx();
+    if (!c || !state || typeof state !== 'object') return;
+    const camOn = !!state.video;
+    const micOn = !!state.audio;
+    if (c.me.camOn === camOn && c.me.micOn === micOn) return;
+    c.me.camOn = camOn;
+    c.me.micOn = micOn;
+    emitRoomInfo(c.room);
+  });
+
+  socket.on('toggle-pause', () => {
+    const c = ctx();
+    if (!c || c.room.state !== 'playing' || !canControl(c.room, c.pid)) return;
+    setPaused(c.room, !c.room.paused);
+  });
+
   socket.on('end-phase-early', () => {
     const c = ctx();
     if (!c || c.room.state !== 'playing' || !canControl(c.room, c.pid)) return;
@@ -1212,6 +1341,7 @@ io.on('connection', (socket) => {
       socket.emit('action-error', 'Sen de oyuncu olduğun için gece aşamalarını erken bitiremezsin. Herkes eylemini yapınca gece zaten kendiliğinden biter.');
       return;
     }
+    if (room.paused) setPaused(room, false);
     shortenTimer(room, 1);
   });
 
@@ -1251,8 +1381,7 @@ io.on('connection', (socket) => {
     room.actions.verdict[pid] = !!guilty;
     socket.emit('verdict-acked', !!guilty);
     broadcastVerdict(room);
-    const eligible = aliveIds(room).filter((id) => id !== room.trial?.accused);
-    if (eligible.every((id) => id in room.actions.verdict)) shortenTimer(room);
+    if (readyToAdvance(room)) autoAdvance(room);
   });
 
   socket.on('set-will', (text) => {
@@ -1320,6 +1449,7 @@ io.on('connection', (socket) => {
       p.selfHealUsed = false;
       p.deathCause = null;
       p.deathRound = null;
+      p.killedBy = null;
     });
     if (!room.players[room.admin]) transferControl(room);
     io.to(room.id).emit('returned-to-lobby');
@@ -1327,6 +1457,19 @@ io.on('connection', (socket) => {
     emitRoomInfo(room);
     emitPrivateStates(room);
     emitChatAccess(room);
+  });
+
+  // Oyuncu "Çık" butonuna bastı: bekleme süresi olmadan koltuğu bırakır
+  socket.on('leave-room', () => {
+    const c = ctx();
+    if (!c) return;
+    const { room, pid, me } = c;
+    if (me.disconnectTimer) clearTimeout(me.disconnectTimer);
+    me.connected = false;
+    me.socketId = null;
+    socket.data.roomId = null;
+    socket.leave(room.id);
+    handleAbandon(room.id, pid);
   });
 
   socket.on('disconnect', () => {
