@@ -32,6 +32,15 @@ const WILL_MAX_LEN = 300;
 const NAME_MAX_LEN = 20;
 const ROOM_MAX_LEN = 40;
 
+// Vampirin seçebileceği hazır öldürme şekilleri (arayüzde her birinin animasyonu var)
+const KILL_METHODS = {
+  bite: 'Boynundan ısırıldı',
+  claw: 'Pençelerle parçalandı',
+  shadow: 'Gölgelerin içine çekildi',
+  drain: 'Son damla kanına kadar emildi',
+  bats: 'Yarasa sürüsü tarafından kaçırıldı',
+};
+
 const TOWN_ROLES = ['villager', 'healer', 'seer', 'hunter', 'elder'];
 const SPECIAL_ROLES = [
   ['healer', 'healerEnabled'],
@@ -42,12 +51,12 @@ const SPECIAL_ROLES = [
 ];
 
 const DEFAULT_SETTINGS = {
-  dayDuration: 60,
-  nightDuration: 30,
-  dawnDuration: 15,
-  defenseDuration: 20,
-  verdictDuration: 15,
-  hunterDuration: 20,
+  dayDuration: 75,
+  nightDuration: 45,
+  dawnDuration: 30,
+  defenseDuration: 35,
+  verdictDuration: 30,
+  hunterDuration: 35,
   vampireCount: 1,
   modEnabled: false,
   healerEnabled: true,
@@ -56,11 +65,12 @@ const DEFAULT_SETTINGS = {
   jesterEnabled: false,
   elderEnabled: false,
   peacefulFirstNight: false,
+  ghostsSeeAll: true,
   trialEnabled: true,
   revealRoles: true,
   silentNight: true,
   inPersonMode: false,
-  winScore: 5,
+  winScore: 0,
 };
 
 const DURATION_LIMITS = {
@@ -71,7 +81,7 @@ const DURATION_LIMITS = {
   verdictDuration: [5, 120],
   hunterDuration: [5, 60],
 };
-const BOOL_SETTINGS = ['healerEnabled', 'seerEnabled', 'hunterEnabled', 'jesterEnabled', 'trialEnabled', 'revealRoles', 'silentNight', 'inPersonMode', 'elderEnabled', 'peacefulFirstNight'];
+const BOOL_SETTINGS = ['healerEnabled', 'seerEnabled', 'hunterEnabled', 'jesterEnabled', 'trialEnabled', 'revealRoles', 'silentNight', 'inPersonMode', 'elderEnabled', 'peacefulFirstNight', 'ghostsSeeAll'];
 
 // ---------------------------------------------------------------------------
 // Yardımcılar
@@ -95,7 +105,7 @@ function sanitizeSettings(current, incoming) {
     if (key in incoming) next[key] = clampInt(incoming[key], min, max, current[key]);
   });
   if ('vampireCount' in incoming) next.vampireCount = clampInt(incoming.vampireCount, 1, 10, current.vampireCount);
-  if ('winScore' in incoming) next.winScore = clampInt(incoming.winScore, 1, 100, current.winScore);
+  if ('winScore' in incoming) next.winScore = clampInt(incoming.winScore, 0, 100, current.winScore);
   BOOL_SETTINGS.forEach((key) => {
     if (key in incoming) next[key] = !!incoming[key];
   });
@@ -219,9 +229,11 @@ function publicTrial(room) {
   return { accused: room.trial.accused || null, candidates: room.trial.candidates || [] };
 }
 
-function buildRoomInfo(room, forPid) {
+// Oda bilgisi herkes için aynıdır (gizli bilgi içermez). Tarihçe/geçmiş sadece "full" istenince eklenir;
+// oyun sırasında bunlar kendi olaylarıyla (history-updated, games-history-updated) gider.
+function buildRoomInfo(room, { full = false } = {}) {
   const n = lobbyParticipantIds(room).length;
-  return {
+  const info = {
     admin: room.admin,
     moderator: room.moderator,
     state: room.state,
@@ -231,22 +243,29 @@ function buildRoomInfo(room, forPid) {
     round: room.round,
     timeLeft: room.timerInterval || room.phaseOpen || room.paused ? room.timeLeft : null,
     settings: room.settings,
-    history: room.history,
-    roundsData: roomRounds(room),
-    currentRoundData: roomCurrentRound(room),
-    gamesHistory: room.gamesHistory,
     playersBase: publicPlayers(room),
-    customRolesMap: forPid && forPid === room.moderator ? room.customRolesMap : {},
     trial: publicTrial(room),
     hunter: room.hunter ? room.hunter.pid : null,
     limits: { minPlayers: MIN_PLAYERS, recommendedVampires: recommendedVampires(n), maxVampires: maxVampires(n) },
   };
+  if (full) {
+    info.roundsData = roomRounds(room);
+    info.currentRoundData = roomCurrentRound(room);
+    info.gamesHistory = room.gamesHistory;
+  }
+  return info;
 }
 
+// Aynı anda gelen değişiklikler tek bir gönderimde birleşir (60 kişilik odada her girişte
+// herkese ayrı ayrı oda bilgisi yollamak veriyi karesel büyütüyordu)
+const ROOM_INFO_BATCH_MS = 40;
 function emitRoomInfo(room) {
-  entries(room).forEach(([pid, p]) => {
-    if (p.connected) io.to(p.socketId).emit('room-info', buildRoomInfo(room, pid));
-  });
+  if (room.roomInfoTimer) return;
+  room.roomInfoTimer = setTimeout(() => {
+    room.roomInfoTimer = null;
+    if (rooms[room.id] !== room) return;
+    io.to(room.id).emit('room-info', buildRoomInfo(room));
+  }, ROOM_INFO_BATCH_MS);
 }
 
 function privateState(room, pid) {
@@ -289,7 +308,19 @@ function voteCounts(votes) {
   return counts;
 }
 
+// Oy sayıları 150 ms'lik paketlerle gider: 60 kişi aynı anda oy verince 60 ayrı yayın
+// (ve istemcide 60 kez tüm kartların yeniden çizilmesi) yerine birkaç yayın olur
+const VOTE_BATCH_MS = 150;
 function broadcastVotes(room) {
+  if (room.voteTimer) return;
+  const phase = room.phase;
+  room.voteTimer = setTimeout(() => {
+    room.voteTimer = null;
+    if (rooms[room.id] === room && room.phase === phase && room.phaseOpen) sendVotes(room);
+  }, VOTE_BATCH_MS);
+}
+
+function sendVotes(room) {
   const counts = voteCounts(room.actions.votes);
   if (room.phase === 'day' || room.phase === 'revote') {
     io.to(room.id).emit('vote-counts', counts);
@@ -301,11 +332,18 @@ function broadcastVotes(room) {
 }
 
 function broadcastVerdict(room) {
+  if (room.verdictTimer) return;
+  room.verdictTimer = setTimeout(() => {
+    room.verdictTimer = null;
+    if (rooms[room.id] === room && room.phase === 'verdict') sendVerdict(room);
+  }, VOTE_BATCH_MS);
+}
+
+function sendVerdict(room) {
   const values = Object.values(room.actions.verdict);
   io.to(room.id).emit('verdict-counts', {
     guilty: values.filter(Boolean).length,
     innocent: values.filter((v) => !v).length,
-    voters: Object.keys(room.actions.verdict),
   });
 }
 
@@ -359,12 +397,31 @@ function systemChat(room, channel, text) {
 
 function sendChatHistory(room, pid) {
   const { read, write } = chatAccess(room, pid);
+  const p = room.players[pid];
+  if (p) {
+    p.chatReadKey = read.join(',');
+    p.chatWriteKey = write.join(',');
+  }
   const history = {};
   read.forEach((ch) => { history[ch] = room.chat[ch]; });
   emitTo(room, pid, 'chat-history', { history, write });
 }
-function emitChatAccess(room) {
-  Object.keys(room.players).forEach((pid) => sendChatHistory(room, pid));
+// Okuma izni değişen oyuncuya geçmiş, sadece yazma izni değişene küçük bir bildirim gider
+function emitChatAccess(room, { reset = false } = {}) {
+  Object.entries(room.players).forEach(([pid, p]) => {
+    if (!p.connected) return;
+    const { read, write } = chatAccess(room, pid);
+    const readKey = read.join(',');
+    const writeKey = write.join(',');
+    if (reset || p.chatReadKey !== readKey) {
+      p.chatReadKey = readKey;
+      p.chatWriteKey = writeKey;
+      sendChatHistory(room, pid);
+    } else if (p.chatWriteKey !== writeKey) {
+      p.chatWriteKey = writeKey;
+      emitTo(room, pid, 'chat-access', write);
+    }
+  });
 }
 
 // ---------------------------------------------------------------------------
@@ -377,6 +434,7 @@ function clearTimers(room) {
   room.timerInterval = null;
   room.gapTimer = null;
   room.autoTimer = null;
+  // Oy paketleri burada silinmez: endPhase onları aşama kapanmadan gönderir
 }
 
 function runTicker(room) {
@@ -420,7 +478,6 @@ function startPhase(room, phase) {
     hunter: room.hunter ? room.hunter.pid : null,
     round: room.round,
   });
-  emitRoomInfo(room);
   emitChatAccess(room);
   runTicker(room);
 }
@@ -506,6 +563,9 @@ function setPaused(room, paused) {
 
 function endPhase(room) {
   if (room.state !== 'playing') return;
+  // Bekleyen oy paketleri aşama kapanmadan gönderilir
+  if (room.voteTimer) { clearTimeout(room.voteTimer); room.voteTimer = null; sendVotes(room); }
+  if (room.verdictTimer) { clearTimeout(room.verdictTimer); room.verdictTimer = null; sendVerdict(room); }
   // Sonuç hesaplanırken ve faz geçişinde gelen eylemler kaybolmasın diye reddedilir
   room.phaseOpen = false;
   io.to(room.id).emit('phase-ended', room.phase);
@@ -531,7 +591,7 @@ function endPhase(room) {
   }
 }
 
-function killPlayer(room, pid, cause, flavor = '') {
+function killPlayer(room, pid, cause, flavor = '', method = null) {
   const p = room.players[pid];
   if (!p || p.isDead) return;
   p.isDead = true;
@@ -545,7 +605,7 @@ function killPlayer(room, pid, cause, flavor = '') {
     left: `${p.userName} oyunu terk etti.`,
   };
   room.history.push({ round: room.round, phase: cause, event: events[cause] || `${p.userName} öldü.`, flavor });
-  io.to(room.id).emit('player-killed', pid, cause, flavor, reveal ? p.role : null, p.will || '');
+  io.to(room.id).emit('player-killed', pid, cause, flavor, reveal ? p.role : null, p.will || '', method);
   if (p.role === 'hunter' && cause !== 'left') room.pendingHunter = pid;
   emitPrivateState(room, pid);
   sendChatHistory(room, pid);
@@ -648,13 +708,17 @@ function resolveDawn(room) {
       rd.nightVictim = null;
     } else {
       rd.nightVictimRole = room.players[target].role;
-      room.players[target].killedBy = room.pendingKillers || [];
-      emitTo(room, target, 'killed-by', room.players[target].killedBy);
-      killPlayer(room, target, 'night', room.nightFlavor || 'Kanı emildi');
+      room.players[target].killedBy = room.settings.ghostsSeeAll ? (room.pendingKillers || []) : [];
+      if (room.settings.ghostsSeeAll) emitTo(room, target, 'killed-by', room.players[target].killedBy);
+      const method = KILL_METHODS[room.nightMethod] ? room.nightMethod : null;
+      const flavor = room.nightFlavor || (method ? KILL_METHODS[method] : 'Kanı emildi');
+      rd.nightKillMethod = method;
+      rd.nightKillFlavor = flavor;
+      killPlayer(room, target, 'night', flavor, method);
     }
   }
   room.nightFlavor = null;
-  io.to(room.id).emit('history-updated', room.history, roomRounds(room));
+  room.nightMethod = null;
   io.to(room.id).emit('current-round-updated', roomCurrentRound(room));
   afterDeaths(room, 'day');
 }
@@ -671,7 +735,9 @@ function endRound(room) {
   room.roundsData.push({ ...room.currentRoundData });
   room.round += 1;
   room.currentRoundData = freshRound(room.round);
-  io.to(room.id).emit('history-updated', room.history, roomRounds(room));
+  // Tarihçenin tamamı yerine sadece kapanan tur gönderilir
+  const closed = roomRounds(room);
+  io.to(room.id).emit('round-upsert', closed[closed.length - 1]);
   io.to(room.id).emit('current-round-updated', roomCurrentRound(room));
 }
 
@@ -749,7 +815,8 @@ function resolveHunter(room) {
     rd.hunterShotRole = room.players[shot].role;
     // Deli avcı tarafından vurulursa kazanamaz; sadece idamla kazanır
     killPlayer(room, shot, 'hunter', 'Avcının son kurşunu');
-    io.to(room.id).emit('history-updated', room.history, roomRounds(room));
+    if (rd === room.currentRoundData) io.to(room.id).emit('current-round-updated', roomCurrentRound(room));
+    else io.to(room.id).emit('round-upsert', publicRounds([rd], room.state === 'finished', room.settings.revealRoles)[0]);
   }
   return afterDeaths(room, info.next);
 }
@@ -805,6 +872,17 @@ function finishGame(room, winner, options = {}) {
     rolesMap[id] = { userName: p.userName, role: p.role, isDead: p.isDead, left: !!p.left, score: scoreOf(room, p.userName), gain: gains[id] || 0 };
   });
 
+  // Bitiş puanı: hedefe ilk ulaşan (en yüksek puanlı) maçı kazanır
+  let champions = [];
+  if (room.settings.winScore > 0 && !forced) {
+    const reached = Object.entries(room.scoreBook).filter(([, sc]) => sc >= room.settings.winScore);
+    if (reached.length) {
+      const top = Math.max(...reached.map(([, sc]) => sc));
+      champions = reached.filter(([, sc]) => sc === top).map(([name, score]) => ({ name, score }));
+      room.matchOver = true;
+    }
+  }
+
   room.gamesHistory.push({
     gameNumber: room.gameNumber,
     winner,
@@ -814,7 +892,7 @@ function finishGame(room, winner, options = {}) {
   });
   io.to(room.id).emit('games-history-updated', room.gamesHistory);
   console.log(`[Room ${room.id}] GAME OVER - Winner: ${winner}${forced ? ' (forced)' : ''}`);
-  io.to(room.id).emit('game-over', { winner, playersDetails: rolesMap, forced, jesterId });
+  io.to(room.id).emit('game-over', { winner, playersDetails: rolesMap, forced, jesterId, champions, winScore: room.settings.winScore });
   emitRoomInfo(room);
   emitPrivateStates(room);
   emitChatAccess(room);
@@ -879,6 +957,9 @@ function assignRoles(room, ids, vCount, specials) {
 // ---------------------------------------------------------------------------
 function deleteRoom(room) {
   clearTimers(room);
+  if (room.voteTimer) clearTimeout(room.voteTimer);
+  if (room.verdictTimer) clearTimeout(room.verdictTimer);
+  if (room.roomInfoTimer) clearTimeout(room.roomInfoTimer);
   Object.values(room.players).forEach((p) => p.disconnectTimer && clearTimeout(p.disconnectTimer));
   delete rooms[room.id];
 }
@@ -969,7 +1050,7 @@ function joinAsPlayer(socket, room, pid, player) {
 }
 
 function sendFullState(socket, room, pid) {
-  socket.emit('room-info', buildRoomInfo(room, pid));
+  socket.emit('room-info', buildRoomInfo(room, { full: true }));
   if (room.state === 'playing') {
     socket.emit('game-started', { phase: room.phase, resume: true });
     socket.emit('phase-changed', room.phase, { timeLeft: room.timeLeft, trial: publicTrial(room), hunter: room.hunter ? room.hunter.pid : null, round: room.round, resume: true });
@@ -1281,6 +1362,7 @@ io.on('connection', (socket) => {
     room.hunter = null;
     room.chat.vampire = [];
     room.chat.dead = [];
+    Object.values(room.players).forEach((p) => { p.chatReadKey = null; });
 
     entries(room).forEach(([id, p]) => {
       p.isDead = false;
@@ -1350,6 +1432,14 @@ io.on('connection', (socket) => {
     if (!c || c.room.state !== 'playing' || !canControl(c.room, c.pid)) return;
     const winner = checkWinner(c.room) || 'villagers';
     finishGame(c.room, winner, { awardScores: false, forced: true });
+  });
+
+  socket.on('kill-method', (method) => {
+    const c = ctx();
+    if (!c || c.room.phase !== 'night' || c.me.role !== 'vampire' || c.me.isDead) return;
+    c.room.nightMethod = KILL_METHODS[method] ? method : null;
+    // Takım arkadaşları da aynı seçimi görsün
+    emitToIds(c.room, aliveVampireIds(c.room), 'kill-method-updated', c.room.nightMethod, c.me.userName);
   });
 
   socket.on('kill-flavor-text', (text) => {
@@ -1427,6 +1517,13 @@ io.on('connection', (socket) => {
     room.phase = 'lobby';
     room.actions = freshActions();
     room.gameNumber += 1;
+    if (room.matchOver) {
+      // Maç bitti: yeni maç için puanlar sıfırlanır
+      room.matchOver = false;
+      room.scoreBook = {};
+      room.statsBook = {};
+      io.to(room.id).emit('match-reset');
+    }
     room.customRolesMap = {};
     room.trial = null;
     room.hunter = null;
@@ -1435,6 +1532,7 @@ io.on('connection', (socket) => {
     room.history = [];
     room.chat.vampire = [];
     room.chat.dead = [];
+    Object.values(room.players).forEach((p) => { p.chatReadKey = null; });
     if (room.moderator && !room.players[room.moderator]) {
       room.moderator = null;
       room.settings.modEnabled = false;
